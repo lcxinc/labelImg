@@ -15,6 +15,8 @@ MiniMapOverlay::MiniMapOverlay(Canvas *canvas, QScrollArea *scrollArea, QWidget 
     : QWidget(parent), m_canvas(canvas), m_scrollArea(scrollArea) {
     setMouseTracking(true);
     setAttribute(Qt::WA_StyledBackground, false);
+    setAttribute(Qt::WA_TranslucentBackground, true);
+    setAttribute(Qt::WA_NoSystemBackground, true);
     setCursor(Qt::PointingHandCursor);
     if (parent) {
         parent->installEventFilter(this);
@@ -61,8 +63,14 @@ void MiniMapOverlay::refreshGeometry() {
     QWidget *viewport = parentWidget();
     const int x = viewport->width() - size.width() - kMargin;
     const int y = viewport->height() - size.height() - kMargin;
-    setGeometry(QRect(QPoint(qMax(kMargin, x), qMax(kMargin, y)), size));
-    raise();
+    const QRect targetGeometry(QPoint(qMax(kMargin, x), qMax(kMargin, y)), size);
+    const bool geometryChanged = geometry() != targetGeometry;
+    if (geometryChanged) {
+        setGeometry(targetGeometry);
+    }
+    if (geometryChanged || !isVisible()) {
+        raise();
+    }
     updateVisibility();
 }
 
@@ -80,12 +88,31 @@ void MiniMapOverlay::paintEvent(QPaintEvent *) {
 
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, false);
-    const double alpha = (m_hovered || m_dragging) ? 1.0 : 0.85;
+    const double alpha = (m_hovered || m_dragging) ? 1.0 : 0.45;
 
     painter.fillRect(rect(), QColor(40, 40, 40, static_cast<int>(200 * alpha)));
     painter.setOpacity(alpha);
     painter.drawImage(rect(), m_overview);
     painter.setOpacity(1.0);
+
+    const QSize imageSize = m_canvas->pixmapSize();
+    if (!imageSize.isEmpty()) {
+        const double xScale = static_cast<double>(width()) / imageSize.width();
+        const double yScale = static_cast<double>(height()) / imageSize.height();
+        painter.setPen(QPen(Qt::yellow, 3));
+        painter.setBrush(Qt::NoBrush);
+        const QVector<Shape> shapes = m_canvas->shapes();
+        for (const Shape &shape : shapes) {
+            if (!shape.visible) {
+                continue;
+            }
+            const QRectF box = shape.boundingRect();
+            painter.drawRect(QRectF(box.x() * xScale,
+                                    box.y() * yScale,
+                                    box.width() * xScale,
+                                    box.height() * yScale));
+        }
+    }
 
     painter.setPen(QPen(QColor(100, 100, 100), 2));
     painter.drawRect(rect().adjusted(0, 0, -1, -1));
@@ -149,8 +176,11 @@ QRectF MiniMapOverlay::viewportRectOnMiniMap() const {
     const QSize imageSize = m_canvas->pixmapSize();
     const double xScale = static_cast<double>(width()) / imageSize.width();
     const double yScale = static_cast<double>(height()) / imageSize.height();
-    const QRectF visibleImageRect(QPointF(m_scrollArea->horizontalScrollBar()->value() / m_canvas->scale(),
-                                          m_scrollArea->verticalScrollBar()->value() / m_canvas->scale()),
+    const QPointF imageOrigin = m_canvas->imageOriginOffset();
+    const QRectF visibleImageRect(QPointF(m_scrollArea->horizontalScrollBar()->value() /
+                                              m_canvas->scale() - imageOrigin.x(),
+                                          m_scrollArea->verticalScrollBar()->value() /
+                                              m_canvas->scale() - imageOrigin.y()),
                                   QSizeF(m_scrollArea->viewport()->width() / m_canvas->scale(),
                                          m_scrollArea->viewport()->height() / m_canvas->scale()));
     QRectF mapped(visibleImageRect.x() * xScale,
@@ -172,8 +202,11 @@ void MiniMapOverlay::centerViewOnMiniMapPoint(const QPointF &point) {
                              clamped.y() / height() * imageSize.height());
     QScrollBar *hBar = m_scrollArea->horizontalScrollBar();
     QScrollBar *vBar = m_scrollArea->verticalScrollBar();
-    hBar->setValue(qRound(imagePoint.x() * m_canvas->scale() - m_scrollArea->viewport()->width() / 2.0));
-    vBar->setValue(qRound(imagePoint.y() * m_canvas->scale() - m_scrollArea->viewport()->height() / 2.0));
+    const QPointF imageOrigin = m_canvas->imageOriginOffset();
+    hBar->setValue(qRound((imagePoint.x() + imageOrigin.x()) * m_canvas->scale() -
+                          m_scrollArea->viewport()->width() / 2.0));
+    vBar->setValue(qRound((imagePoint.y() + imageOrigin.y()) * m_canvas->scale() -
+                          m_scrollArea->viewport()->height() / 2.0));
 }
 
 void MiniMapOverlay::updateVisibility() {

@@ -23,6 +23,7 @@ signals:
     void closeRequested();
 
 protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
@@ -30,6 +31,7 @@ protected:
 
 private:
     QToolButton *createButton(const QString &text, const QString &toolTip, const QString &objectName) const;
+    void installToolWidgetEventFilter(QWidget *widget);
 
     QHBoxLayout *m_layout = nullptr;
     QLabel *m_iconLabel = nullptr;

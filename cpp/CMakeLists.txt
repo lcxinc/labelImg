@@ -12,10 +12,18 @@ set(CMAKE_AUTOMOC ON)
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Xml Test)
 
 set(CORE_SOURCES
+    src/core/AiAssistBridge.cpp
+    src/core/AiAssistBridge.h
+    src/core/AiAssistSession.cpp
+    src/core/AiAssistSession.h
     src/core/AnnotationIO.cpp
     src/core/AnnotationIO.h
     src/core/LabelListModel.cpp
     src/core/LabelListModel.h
+    src/core/LabelMeConfig.cpp
+    src/core/LabelMeConfig.h
+    src/core/ImageIO.cpp
+    src/core/ImageIO.h
     src/core/PerformanceMonitor.cpp
     src/core/PerformanceMonitor.h
     src/core/ResourcePaths.cpp
@@ -75,3 +83,5 @@ add_executable(labelImgCppUiTests
 )
 target_link_libraries(labelImgCppUiTests PRIVATE labelImgCppCore Qt6::Widgets Qt6::Test)
 add_test(NAME labelImgCppUiTests COMMAND labelImgCppUiTests)
+set_tests_properties(labelImgCppTests labelImgCppUiTests
+    PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/..")

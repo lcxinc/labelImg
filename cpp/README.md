@@ -15,15 +15,13 @@ Install:
 Configure and build:
 
 ```powershell
-cmake -S cpp -B cpp/build -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH="C:\Qt\6.6.3\msvc2019_64"
-cmake --build cpp/build --config Release
-ctest --test-dir cpp/build -C Release --output-on-failure
+bin\build.bat -QtPrefix "D:\Qt\6.11.0\msvc2022_64" -RunTests
 ```
 
 Deploy manually when needed:
 
 ```powershell
-windeployqt cpp\build\Release\labelImgCpp.exe
+windeployqt target\cpp-build\Release\labelImgCpp.exe
 ```
 
 Build the Windows deployment directory, portable zip, and per-user installer:
@@ -32,7 +30,11 @@ Build the Windows deployment directory, portable zip, and per-user installer:
 powershell -ExecutionPolicy Bypass -File cpp\packaging\build_windows_installer.ps1
 ```
 
+Build artifacts are written under `target/`; the repository `bin/` directory contains only developer entry scripts.
+
 The installer writes to `%LOCALAPPDATA%\Programs\labelImgCpp` and creates Start Menu/Desktop shortcuts, so it does not require administrator rights.
+
+The optional `labelme_ai_bridge.py` is included beside the executable in both the portable zip and installer payload, so AI point/box modes keep the same runtime lookup path after installation.
 
 The C++ app loads resources from the installed application directory first, then falls back to the repository root during development:
 

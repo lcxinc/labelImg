@@ -11,16 +11,17 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $cppRoot = Resolve-Path (Join-Path $scriptRoot "..")
 $repoRoot = Resolve-Path (Join-Path $cppRoot "..")
 if ([string]::IsNullOrWhiteSpace($BuildDir)) {
-    $BuildDir = Join-Path $cppRoot "build"
+    $BuildDir = Join-Path $repoRoot "target\cpp-build"
 }
 
-$distRoot = Join-Path $cppRoot "dist"
+$distRoot = Join-Path $repoRoot "target\dist"
 $deployName = "labelImgCpp-$Version-win64"
 $deployRoot = Join-Path $distRoot $deployName
 $installerWork = Join-Path $distRoot "installer-work"
 $payloadZip = Join-Path $installerWork "payload.zip"
 $installerExe = Join-Path $distRoot "$deployName-installer.exe"
 $portableZip = Join-Path $distRoot "$deployName.zip"
+$stagingCab = Join-Path $distRoot "~$deployName-installer.CAB"
 
 if (!(Test-Path (Join-Path $BuildDir "CMakeCache.txt"))) {
     $qtPrefix = Split-Path -Parent $QtBin
@@ -38,6 +39,7 @@ Remove-Item -LiteralPath $deployRoot -Recurse -Force -ErrorAction SilentlyContin
 Remove-Item -LiteralPath $installerWork -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $installerExe -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $portableZip -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $stagingCab -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $deployRoot, $installerWork | Out-Null
 
 Copy-Item -LiteralPath $builtExe -Destination $deployRoot
@@ -53,6 +55,11 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "resources\strings") -Destination (J
 Copy-Item -LiteralPath (Join-Path $repoRoot "data\predefined_classes.txt") -Destination (Join-Path $deployRoot "data\predefined_classes.txt")
 Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination (Join-Path $deployRoot "LICENSE.txt")
 Copy-Item -LiteralPath (Join-Path $cppRoot "README.md") -Destination (Join-Path $deployRoot "README.txt")
+$aiBridge = Join-Path $cppRoot "tools\labelme_ai_bridge.py"
+if (!(Test-Path $aiBridge)) {
+    throw "AI bridge script was not found: $aiBridge"
+}
+Copy-Item -LiteralPath $aiBridge -Destination (Join-Path $deployRoot "labelme_ai_bridge.py")
 
 @'
 $ErrorActionPreference = "Stop"
@@ -137,11 +144,30 @@ SourceFiles0=$installerWork
 %FILE1%=
 "@ | Set-Content -LiteralPath $sedPath -Encoding ASCII
 
-& "$env:SystemRoot\System32\iexpress.exe" /N /Q $sedPath
+$iexpress = Start-Process -FilePath (Join-Path $env:SystemRoot "System32\iexpress.exe") `
+    -ArgumentList @("/N", "/Q", $sedPath) -WindowStyle Hidden -PassThru
+$deadline = (Get-Date).AddSeconds(45)
+while (!$iexpress.HasExited -and (Get-Date) -lt $deadline) {
+    Start-Sleep -Milliseconds 250
+}
+if (!$iexpress.HasExited) {
+    Stop-Process -Id $iexpress.Id -Force -ErrorAction SilentlyContinue
+    throw "IExpress timed out while creating installer: $installerExe"
+}
+if ($iexpress.ExitCode -ne 0) {
+    throw "IExpress failed with exit code $($iexpress.ExitCode): $installerExe"
+}
 if (!(Test-Path $installerExe)) {
     throw "Installer was not created: $installerExe"
 }
+$installerSize = (Get-Item -LiteralPath $installerExe).Length
+$payloadSize = (Get-Item -LiteralPath $payloadZip).Length
+if ($installerSize -lt $payloadSize) {
+    throw "Installer is incomplete ($installerSize bytes, expected at least $payloadSize): $installerExe"
+}
+Remove-Item -LiteralPath $stagingCab -Force -ErrorAction SilentlyContinue
 
 Write-Host "Deploy directory: $deployRoot"
 Write-Host "Portable zip: $portableZip"
 Write-Host "Installer: $installerExe"
+exit 0

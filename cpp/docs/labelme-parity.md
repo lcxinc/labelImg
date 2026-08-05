@@ -1,0 +1,294 @@
+# LabelMe Parity Notes
+
+Reference source during development: the local `refs/labelme` checkout when
+available; the Python application in this repository remains the shipped
+behavioral baseline. The external checkout is intentionally not committed.
+
+## Current Increment
+
+- MainWindow language refresh now covers LabelMe drawing modes, file context actions, copy-navigation actions, view settings, dock titles, file filtering controls, sampling labels, and dynamic mark/unmark text through the `en`, `zh-CN`, `zh-TW`, and `ja-JP` bundles; status-bar sampling text follows the active locale as well.
+- Footer mode selectors and shortcut buttons now refresh their labels and tooltips immediately when the language changes, including the shortcut suffixes for View/Create across all supported bundles.
+- Clipboard operation feedback now resolves through the active language bundle, so copying and pasting selected shapes no longer leaves English status text after a locale switch.
+- The LabelMe dock split is preserved: the label/AI dock hosts the unique `Label List`, while the separate `Annotation List` dock hosts individual shapes. Both dock titles, visibility, and feature policies refresh independently at runtime.
+- The Settings dialog uses the active bundle for its General/View tabs, language and format labels, and LabelMe display-label-popup option, so opening Settings after a locale switch no longer mixes Chinese and translated UI.
+- The file list title, label-filter menu, and filename-search suffix now refresh from the active bundle together with the filtered file count, so switching language does not leave the file dock in a mixed locale.
+- AI duplicate suppression now follows LabelMe's two-stage rule: existing geometry suppresses any redundant detection, while newly returned detections are deduplicated within the same label. `Shape::isRedundantWith` keeps IoU and intersection-over-smaller independent, using the configured IoU threshold plus LabelMe's fixed `0.85` containment threshold; polygon/circle/rectangle geometry and decoded mask pixels remain supported with a bounded raster fallback for very large masks.
+- AI overlap checks now rasterize ordinary rectangle/polygon/circle/oriented-rectangle shapes with inclusive pixel endpoints before computing IoU and containment, matching LabelMe's `_local_mask_from_shape`; unknown plugin shape types are excluded instead of being treated as arbitrary filled polygons.
+- Empty AI point/box inference now cancels the temporary prompt shape and removes its temporary undo entry instead of turning a failed inference into a normal annotation; `ai/bridgePath` can point to a compatible external bridge for controlled deployments and tests.
+- Canvas sizing now includes LabelMe's bounded overscroll slack when a scaled image exceeds the viewport; image painting, pointer coordinates, zoom anchoring, and minimap scroll mapping all account for the centered image origin.
+- New sessions now start in LabelMe's `FIT_WINDOW` zoom mode; stored per-file view state and explicit manual/fit-width actions continue to override that default.
+- Canvas instances now start in LabelMe's `EDIT` mode; create mode is entered only through an explicit create action, so the first empty click can clear selection rather than creating an implicit rectangle.
+- Point-backed shapes (circle, line, linestrip, oriented rectangle, and plugin paths) now keep LabelMe's vertex/whole-shape editing semantics; window-style border resizing is restricted to native axis-aligned rectangles so a circle or path cannot be rewritten into rectangle geometry.
+- Vertex drags that leave the image now use LabelMe's ray-to-image-edge projection instead of independent coordinate clamping, preserving the intended diagonal boundary point for polygons, lines, and other editable vertices.
+- Remaining status-bar, brightness/contrast, validation, file-list, and AI workflow messages are resolved through the active language bundle, so switching locale no longer leaves those runtime messages in fixed Chinese.
+- Canvas brightness/contrast now follows LabelMe's PIL order and semantics: brightness is applied first, then contrast uses the brightened image's grayscale mean instead of a fixed 128 midpoint; the original alpha channel is retained.
+- Canvas status text and edit hints now use the same active bundle, including polygon/linestrip/points progress, oriented-rectangle progress, dimensions, coordinates, edge insertion, vertex dragging, rotation, and resize hints.
+- Added LabelMe JSON rectangle and polygon import/export in `AnnotationIO`.
+- Existing LabelMe `version` values are preserved when loading and saving LabelMe JSON; new LabelMe files default to the reference `5.7.0` version.
+- Existing LabelMe `imagePath` values are preserved when they are relative paths; new files created from absolute image paths still write the image file name.
+- Windows-style LabelMe `imagePath` separators are normalized to `/` on load, so relative external images resolve consistently across platforms and round-trip in LabelMe's canonical form.
+- LabelMe top-level fields follow the reference format:
+  - `version`
+  - `flags`
+  - `shapes`
+  - `imagePath`
+  - `imageData`
+  - `imageHeight`
+  - `imageWidth`
+- Axis-aligned rectangles now use LabelMe's native two-corner point representation in memory and on save; legacy four-corner rectangles remain readable and keep their bounding-box editing behavior.
+- Non-reserved top-level fields outside LabelMe's standard keys are preserved as LabelMe `other_data` during load/save and MainWindow open/save flows.
+- Rectangle shapes are written with:
+  - `label`
+  - `points`
+  - `group_id`
+  - `description`
+  - `shape_type: "rectangle"`
+  - `flags`
+  - `mask`
+- Polygon, point, line, linestrip, circle, mask, and oriented rectangle shapes are written with their native `shape_type` and original point list.
+- `verified` is mapped to top-level `flags.verified`.
+- MainWindow accepts LabelMe-style local image drag-and-drop; supported files are deduplicated, appended to the current file list, and the first new image is opened immediately.
+- Other boolean top-level `flags` are preserved by LabelMe import/export and by the MainWindow open/save flow.
+- LabelMe top-level `flags` input is validated as an object (or `null`/omitted), and every flag value must be boolean; malformed metadata is rejected instead of being silently discarded.
+- Other boolean top-level `flags` can be edited in the right label panel as `key=true/false` lines when the active format is LabelMe.
+- `difficult` is mapped to shape-level `flags.difficult`.
+- Shape-level `flags`, `group_id`, and `description` are preserved by LabelMe import/export.
+- Non-reserved shape-level fields are preserved as LabelMe shape `other_data` during load/save and MainWindow open/save flows.
+- Shape-level `description: null` or an omitted description is normalized to the editable empty string and saved as `description: ""`, matching LabelMe's loader/serializer behavior.
+- LabelMe save normalizes every shape to the reference schema by writing `description` and `mask` fields even when the input omitted them (`""` and JSON `null` respectively); legacy internal null-description markers are emitted as the normalized empty string.
+- LabelMe JSON is emitted with UTF-8 text, preserved insertion order, two-space indentation, and no trailing newline to match the reference writer's human-readable format.
+- LabelMe-style per-label flag presets are supported through the persisted `labelme/labelFlags` setting using either `pattern=flag1,flag2` lines or LabelMe-style YAML inline strings such as `{person.*: [male, tall]}`; matching is regex-based from the start of the label, and defaults are applied on load, create, and label edit.
+- The same `labelme/labelFlags` setting can also point to an existing external config file; the file contents are loaded and parsed with the same LabelMe-compatible rules.
+- A dedicated `Edit LabelMe label_flags` action opens a text editor for `labelme/labelFlags`; accepted changes are persisted and immediately reloaded for the current session. When the setting points to an external config file, the editor shows file contents and writes accepted changes back to that file while preserving the setting path.
+- Existing top-level `imageData` payloads are decoded on load; MainWindow writes them only when `Save With Image Data` is enabled, and writes JSON `null` when the option is disabled, matching LabelMe's `with_image_data` behavior.
+- New LabelMe image data follows LabelMe's displayable encoding rule: ordinary JPG/PNG files without an orientation transform keep their original bytes, while other decodable formats are normalized to JPEG quality 95 or PNG when alpha is present before Base64 embedding.
+- Embedded `imageData` payloads are decoded during LabelMe import/export and rejected when their actual dimensions do not match declared `imageWidth`/`imageHeight`, matching LabelMe's dimension validation behavior.
+- Optional `imageWidth` and `imageHeight` values are validated independently; missing dimensions are filled from the decoded image, and unknown dimensions are written as JSON `null` instead of Qt's `-1` sentinel.
+- When `imageData` is null, import reads the referenced `imagePath` image next to the LabelMe JSON and rejects missing images or actual dimensions that do not match declared `imageWidth`/`imageHeight`.
+- MainWindow image display and annotation-dimension reads honor EXIF orientation through `QImageReader::setAutoTransform(true)`, matching LabelMe's `apply_exif_orientation` behavior; embedded LabelMe `imageData` remains decoded as supplied.
+- Shared `ImageIO` display loading now normalizes Qt-decoded 16-bit grayscale, RGB/RGBA64, and RGBA16/32FPx4 images to 8-bit display images using per-channel min/max scaling; constant or non-finite channels become black, while ordinary JPEG/PNG bytes remain unchanged for LabelMe image-data embedding.
+- Shared `ImageIO` now includes a dependency-free classic TIFF and uncompressed BigTIFF fallback for Qt-incompatible 1/2/4/8/16/32-bit integer and 32-bit floating-point pages, including packed-sample extraction, PackBits, TIFF-LZW, and TIFF-Deflate strips, integer Predictor 2 modulo reconstruction, 32-bit floating-point Predictor 3 byte-plane reconstruction, tiled pages with edge-tile clipping, and the multi-page stack layout emitted by `tifffile`; channels are normalized like LabelMe before display or `imageData` encoding. Uncommon packed fill orders and unsupported bit depths still fall back to Qt when available.
+- LabelMe JSON files with `imageData: null` validate external image dimensions after the same EXIF orientation transform, so rotated JPEGs are accepted with their displayed width and height.
+- LabelMe load failures now return a diagnostic reason. When embedded image data is invalid or its declared dimensions are inconsistent but the referenced external image is available, MainWindow offers a confirmation repair flow; accepting it loads the external image, marks the document dirty, and persists corrected dimensions on save.
+- MainWindow's LabelMe save flow preserves loaded `version`, relative `imagePath`, and top-level boolean flags; embedded `imageData` follows the explicit save-with-image-data setting.
+- MainWindow can open a LabelMe `.json` file directly when it contains embedded `imageData`, reconstructing the image and saving back to the original JSON path.
+- MainWindow can also open a LabelMe `.json` with `imageData: null`, resolving the relative `imagePath` beside the JSON and keeping that JSON as the annotation save target.
+- The File > Open path now accepts both supported images and LabelMe `.json` files. Opening an image imports its containing directory; opening a LabelMe JSON switches to the standalone annotation state and disables the image list, matching LabelMe's `_load_from_file_or_dir` behavior.
+- LabelMe save can optionally embed the current source image bytes into top-level `imageData` through the persisted `labelme/embedImageData` setting.
+- Mask shapes keep their native `shape_type: "mask"`, bounding points, and base64 PNG `mask` payload through load/save round-trips.
+- LabelMe JSON loading now validates the required top-level `imagePath`, `imageData`, and `shapes` fields, rejects malformed image payload types, and rejects missing external images or dimension mismatches.
+- Shape loading validates required string `label`/`shape_type` fields, non-empty `[x, y]` point arrays, string-to-boolean `flags`, and decodable mask image payloads; malformed shapes are rejected instead of silently downgraded. Unknown plugin-defined `shape_type` strings and their original points are retained for round-trip compatibility, while the canvas uses their original closed point path for display, hit testing, and vertex editing.
+- Shape loading also rejects non-string non-null `description` values and non-integer or out-of-range `group_id` values instead of coercing them.
+- Mask shapes are rendered from their decoded PNG payload and click hit testing uses non-zero mask pixels instead of the bounding rectangle.
+- Mask shapes without a bitmap payload fall back to their two-point bounding rectangle for rendering and hit testing, matching LabelMe's plugin/legacy fallback.
+- Mask rendering includes a pixel-aligned outline around the non-zero mask boundary, matching LabelMe's contour overlay in addition to the translucent fill.
+- Mask shapes do not expose draggable vertices, matching LabelMe's rule that mask geometry remains anchored to its bitmap payload.
+- Mask shapes also do not expose rectangle resize handles; mask geometry changes only through LabelMe-style brush paint/erase editing or whole-shape movement.
+- `Shape::toMask` now provides the LabelMe `shape_to_mask` primitive rasterization contract for rectangles, polygons, oriented rectangles, circles, lines, linestrips, and points; unsupported containers such as `points` return a null mask instead of silently changing geometry.
+- The label edit dialog can edit shape `label`, `group_id`, `description`, and boolean `flags`.
+- The LabelMe `description` editor is multiline and preserves line breaks through the JSON round-trip.
+- The label edit dialog now exposes matching LabelMe `label_flags` as a checkable preset list alongside the raw flags editor; changing either view keeps the other synchronized and unknown raw flags remain editable.
+- The label edit dialog now includes a sorted LabelMe-style label list; selecting a row updates the editor, and `Up`/`Down` in the editor moves through the list.
+- The label edit dialog keeps the modal open when an editable label is blank; confirmation validates the trimmed value before accepting, while the editable field uses a LabelMe-style case-insensitive completer.
+- Polygon shapes are rendered with their real outline/fill in `Canvas`.
+- Polygon creation mode is available from the mode menu with shortcut `P`.
+  - Left click adds vertices.
+  - `Return`/`Enter` or right click finishes the polygon.
+  - `Esc` cancels the in-progress polygon.
+  - The existing label popup is shown after completion and uses the last-used label; `labelme/displayLabelPopup` can disable the popup while retaining that label.
+- Cancelling the label popup removes the just-created polygon draft, matching LabelMe's `undo_last_line` path instead of leaving an unlabeled shape in the document.
+- The creation transaction captures the pre-drawing dirty state for basic, polygon, linestrip, points, oriented-rectangle, and mask modes; cancelling a label popup restores that state instead of making an already-dirty document appear clean.
+- Creation modes draw a lightweight horizontal/vertical crosshair at the pointer inside the image; it is disabled outside create mode, disappears when the pointer leaves the canvas, and follows each `canvas.crosshair.<shape_type>` setting from startup YAML. Defaults match LabelMe: rectangle and AI-box enabled, other known modes disabled. The shared `epsilon` setting controls vertex, rotation-handle, edge, and shape hit tolerance. `canvas.double_click: none` disables double-click completion while `close` keeps it enabled. `shape.point_size` controls the screen-pixel size of point/vertex markers and draft vertices, clamped to `1..64`.
+- Switching creation types while a basic shape is being drafted preserves the anchor and last cursor position, then continues the draft in the new compatible mode instead of discarding it; a subsequent basic-shape click finalizes the preserved draft without creating a duplicate temporary shape.
+- Create-mode actions follow LabelMe's availability rule: while a mode is active only that mode's action is disabled, while the other drawing modes remain enabled for immediate switching; edit/view mode restores all drawing actions subject to annotation editability.
+- Oriented-rectangle creation follows LabelMe's three-click workflow and also accepts `Return`/`Space` or a valid double-click after the third corner preview has moved; an invalid preview remains an active draft instead of being discarded. Point-shape hit testing converts the configured screen-pixel marker size back to image coordinates at the current zoom, so selection tolerance remains stable from 0.5% through 1600%.
+- Multi-point (`points`) selection uses the same screen-pixel marker-radius rule for each vertex rather than the broader general shape epsilon, matching LabelMe's point-container hit testing at every zoom level.
+- Label colors follow LabelMe's `shape_color` configuration: `manual` reads `label_colors.<label>`, `auto` assigns deterministic colormap colors using the configured label order and `shift_auto_shape_color`, and other values use `default_shape_color`. The resolved color is applied to loaded and newly created shapes as well as label-list swatches.
+- Automatic label colors use the full 256-entry `imgviz.label_colormap()` bit-coded palette and Python modulo semantics, so labels beyond the first 24 and negative color shifts remain aligned with LabelMe instead of wrapping through a short legacy palette.
+- LabelMe shape palette options `shape.vertex_fill_color`, `shape.hvertex_fill_color`, `shape.select_line_color`, and `shape.select_fill_color` are applied by Canvas, while `shape.line_color`, `shape.fill_color`, and `shape.point_size` control draft geometry and marker sizing.
+- Completed polygon vertices can be selected and dragged in edit mode without converting the shape to a rectangle.
+- Rectangle creation honors LabelMe's `Shift`-for-square gesture while retaining the existing persisted draw-square setting and Control shortcut.
+- Polygon creation snaps the cursor to the first vertex and completes the shape when clicked within LabelMe's `epsilon`; `Alt` temporarily disables that snap, and `canvas.snapping` can disable it globally.
+- A first drawing click in the scrollable slack outside the image is ignored like LabelMe; an already active draft still clamps its endpoint to the image edge when the pointer leaves the image.
+- Linestrip creation also accepts LabelMe's `Ctrl` + left-click completion shortcut after at least two points.
+- Shape finalization rejects LabelMe-degenerate drafts: polygons need three distinct points, linestrips need two distinct points, and zero-length or too-small rectangle/line/circle/oriented-rectangle drafts are discarded from both mouse and keyboard completion paths.
+- Degenerate drafts are rejected before commit without a document-change event. Cancelling the label popup rolls back the transient creation without a new undo entry or dirty-state change, matching LabelMe's `undo_last_line` plus backup removal behavior.
+- AI point prompts render positive points with the active prompt color and `Shift`-negative points in red, matching LabelMe's prompt feedback while preserving the prompt label list sent to inference.
+- AI point prompt shapes retain per-point `point_labels` in memory through commit, copy, vertex insertion, and removal; the temporary prompt list is cleared after the shape-created signal is consumed, while LabelMe JSON keeps its standard schema without serializing this transient AI state.
+- Polygon topology editing follows LabelMe's modifier pattern:
+  - `Alt` + left click near a polygon edge inserts a point.
+  - `Alt` + `Shift` + left click on a polygon vertex removes the point, while keeping polygons at three or more points.
+- `Add Point to Edge` is also exposed as a View/context action; it is enabled only while the pointer is hovering a polygon/linestrip edge, inserts at the hovered image position, and selects the new vertex.
+- The `删除选中顶点` action follows LabelMe's `remove_selected_point` shortcut: `Backspace` (and `Meta+H`) removes the currently hovered polygon/linestrip vertex while preserving the shape minimum-point constraint.
+- Polygon and linestrip point insertion/removal are also available from the canvas context menu at the clicked image position.
+- A plain right-click on an existing shape selects that shape before opening the canvas menu; right-drag remains a pan gesture after the drag threshold.
+- Point, line, linestrip, and circle LabelMe shapes are imported/exported without rectangle downgrade, rendered on the canvas, and their vertices can be dragged in edit mode.
+- LabelMe `points` shapes are imported/exported as multi-point landmarks, rendered as independent point markers, and each landmark can be selected and moved without converting the shape type.
+- Point, line, linestrip, and circle creation modes are exposed in the main mode menu; point uses one click, line/circle use two drag endpoints, and linestrip uses repeated clicks plus `Return`/`Enter` or right click to finish. All still show the existing label popup.
+- A dedicated `创建点集` mode uses repeated clicks and `Return`/`Enter` or right click to create one native LabelMe `points` shape; the point markers remain independently editable afterward.
+- During polygon, linestrip, or points drawing, `Ctrl+Z` removes the last draft point; outside an active draft it keeps the normal committed-shape undo behavior.
+- `Backspace` also removes the last point while a polygon, linestrip, or points draft is active; in edit mode it retains the existing selected-vertex removal behavior.
+- The View menu also exposes LabelMe's `Undo Last Point` action; it is enabled only during an active draft, while the committed-shape undo action is disabled until the draft is finished.
+- A native `mask` creation mode is exposed in the main mode menu. Dragging a brush over the image creates a cropped non-zero grayscale PNG mask with LabelMe bounding points and opens the normal label prompt.
+- Cancelling the mask label popup removes the just-created mask annotation; no unlabeled mask payload is retained in the document.
+- Selecting a mask and enabling the `编辑掩码（Shift 擦除）` action supports brush paint and `Shift`-drag erase; edits are cropped back to the non-zero mask bounds and keep the LabelMe PNG payload and bounding points synchronized.
+- Linestrip topology editing follows LabelMe's polyline pattern:
+  - `Alt` + left click near a linestrip segment inserts a point.
+  - `Alt` + `Shift` + left click on a linestrip vertex removes the point, while keeping linestrips at two or more points.
+  - Linestrip hit testing and edge insertion also follow LabelMe's rolled point list, so the last-to-first closing edge is selectable even though the rendered polyline remains open.
+- Oriented rectangle LabelMe shapes are imported/exported without rectangle downgrade, rendered as four-point closed shapes, and their vertices can be dragged while preserving `shape_type`.
+- Oriented rectangle corner dragging now reprojects the adjacent corners to keep the four points a constrained parallelogram, and edge-midpoint rotation handles rotate the shape around its center without changing `shape_type`.
+- Oriented-rectangle rotation now matches LabelMe by applying the rotated points without clipping or rejecting corners that pass outside the image; vertex dragging and whole-shape translation remain bounded.
+- Oriented rectangle vertex dragging uses LabelMe's image-edge intersection clipping before reprojection, so dragging beyond the canvas keeps every corner inside the image without breaking the parallelogram.
+- Core `Shape` rotation is restricted to four-point `oriented_rectangle` shapes; other shape types reject rotation instead of silently changing their geometry.
+- Oriented rectangle creation is exposed in the main mode menu:
+  - First click sets the first corner.
+  - Second click sets the orientation edge.
+  - Third click closes the rectangle by projecting onto the perpendicular edge.
+  - The existing label popup is shown after completion and uses the last-used label.
+- Cancelling the label popup after an oriented rectangle is created removes the just-created four-corner annotation instead of retaining an unlabeled draft.
+- Committed oriented rectangles render LabelMe's direction arrow from the first edge toward the rectangle center, using the configured vertex color so orientation remains visible after reload.
+- Unknown LabelMe/plugin shape types are retained with their original point list and extra JSON fields; saving them does not silently convert them to rectangles.
+- Loaded unknown/plugin shapes keep LabelMe's closed runtime path semantics: the canvas draws and hit-tests their original point path, exposes the original vertices for editing, and includes the `closed` state in undo snapshots without adding a non-standard JSON field.
+- `LabelMe` is available as a fourth save format in the footer format selector.
+- The core test suite now includes round-trip guards for all LabelMe JSON files under `refs/labelme/examples`, excluding the COCO export file, covering real task examples for bbox detection, classification, instance/semantic segmentation, primitives, tutorial, and video annotation.
+- Canvas now supports Ctrl-click multi-selection, group-bounded movement, duplicate-with-metadata, and delete-all-selected operations; the MainWindow label list uses extended selection and mirrors the active shape set.
+- In edit mode, `Ctrl+A` selects every shape on the canvas, matching LabelMe; the View menu's `显示全部标注` command remains available without stealing the canvas shortcut.
+- Editing a multi-selection now follows LabelMe's common-value behavior: shared label, group_id, description, and flags can be applied to every selected shape; mixed fields remain disabled instead of overwriting divergent metadata.
+- The View menu exposes LabelMe-style `keep_prev` behavior as `保留上一张标注` (`Ctrl+P`); when enabled, navigating to an image with no existing shapes carries the previous image's shapes into the new image and marks the document for saving, while existing annotations take precedence.
+- `Ctrl+Shift+D` and `Ctrl+Shift+A` provide LabelMe's temporary copy-on-navigation behavior: the current shapes are carried to the next/previous image even when `keep_prev` is disabled. The normal `D`/`A` navigation remains unchanged.
+- The View menu exposes LabelMe-style `keep_prev_scale` behavior as `保留上一张缩放`; manual zoom is remembered per image during the session, and a new image inherits the previous manual scale only when this mode is enabled. Existing per-image view state takes precedence when returning to an image.
+- The View menu exposes LabelMe-style `fill_drawing` behavior as `填充绘制多边形`; polygon drafts show a translucent filled preview while the committed point list remains unchanged.
+- The View menu exposes LabelMe's `toggle_all_shapes` behavior as `切换全部标注可见性` (`T`); a partially hidden set becomes fully visible, and a fully visible set becomes fully hidden.
+- The View menu exposes LabelMe's `reset_layout` workflow as `重置布局`; it restores the startup dock state and removes only the persisted dock layout, leaving annotation and other settings intact.
+- The View menu exposes a LabelMe-style `brightness_contrast` dialog with live 0..150 sliders, cancel-to-restore behavior, and per-image brightness/contrast state kept for the current session. `保留上一张亮度/对比度` can carry the values to a new image.
+- The File menu now exposes a LabelMe-style `Settings` action (`Ctrl+Shift+,`) with grouped General and View/Annotation pages; accepted changes apply through the existing actions and persist through `QSettings`. The General page includes `display_label_popup` behavior via `labelme/displayLabelPopup`, enabled by default.
+- When an editable YAML config file is active, the Settings dialog exposes `Open config file as text...`; activating it closes the dialog before handing the file to the platform's default text editor, so manual edits are not overwritten by the dialog.
+- Settings changes are written to an editable LabelMe YAML file before live widgets are updated; a failed config write leaves the current runtime settings unchanged instead of reporting a value that will be lost on restart.
+- The File menu exposes LabelMe's checkable `Save With Image Data` command; it controls the existing `labelme/embedImageData` setting and writes the source image bytes into `imageData` on the next LabelMe save.
+- Startup accepts LabelMe-style `--config <yaml>` files. Scalar values, flow/block label lists, and dotted nested options such as `canvas.fill_drawing` and `shape.line_color` are applied before the startup image or directory is opened.
+- `--config` also accepts an inline YAML mapping, including multiline mappings and flow mappings such as `{auto_save: false, labels: [cat, dog]}`; inline configuration is treated as a session override and does not rewrite a config file. LabelMe-compatible aliases `--nosortlabels`, `--labelflags`, and `--validatelabel` are accepted alongside their current spellings, while deprecated `--nodata` and `--autosave` remain harmless no-ops.
+- The default user config follows LabelMe's `~/.labelmerc` behavior: the file is created on first startup when the location is writable, and legacy `SegmentAnything (speed|balanced|accuracy)` AI names are migrated to `Sam (...)` before model selection. The C++ point-prompt model list mirrors LabelMe's EfficientSam, Sam, Sam2, and Sam3 entries so migrated settings and current model IDs remain actionable.
+- Normal startup now reads the existing user `~/.labelmerc` as LabelMe does; legacy `store_data`, brightness/contrast carry-over, and polygon shortcut keys are migrated before applying the config. `--reset-config` clears only window geometry and dock state, then exits without deleting annotation settings.
+- LabelMe `shortcuts.<name>` YAML entries override the corresponding C++ QAction shortcuts, including single shortcuts and flow lists such as `open_next: [D, Ctrl+Shift+D]`; omitted entries retain the application's current defaults.
+- The extended drawing actions accept external shortcut overrides through `shortcuts.create_points`, `shortcuts.create_mask`, `shortcuts.create_ai_points`, and `shortcuts.create_ai_box`; `canvas.crosshair.points` and `canvas.crosshair.mask` independently control crosshair rendering for those modes.
+- LabelMe's `shortcuts.quit` is a real File-menu `Quit` action, and `ai.default` selects the configured AI model by display name or model id.
+- LabelMe label-dialog options `sort_labels`, `label_completion` (`startswith` or `contains`), and `show_label_text_field` are applied to the edit/create label workflow; unsorted dialogs preserve configured label order and keep drag-reordering available.
+- When no selected, remembered, default, or configured label exists, creating a shape keeps the draft unlabeled and opens the label editor even if `display_label_popup` is disabled; this avoids silently inventing a placeholder class and matches LabelMe's `text or not text` creation rule.
+- LabelMe `fit_to_content.column` and `fit_to_content.row` are applied to the label dialog list; long labels can expand the list width and enabling row fitting expands the list to all configured labels while the default remains compact.
+- The label dock includes a LabelMe-style unique-label list; selecting a label makes it the next shape's label, `Esc` or clicking empty space clears that choice, and labels learned from loaded or edited shapes are appended to the list. Individual annotations are shown in the separate annotation dock.
+- The annotation list preserves LabelMe's multi-selection when a selected row's visibility checkbox is toggled; ordinary row clicks still narrow the selection, while the restored selection is synchronized back to Canvas.
+- Toggling visibility on one row of a multi-selected label group now applies the same checked state to every selected shape, while inline label edits remain single-row operations.
+- The label-panel `difficult` checkbox now updates both the legacy runtime field and `shape.flags.difficult`, so unchecking a LabelMe shape cannot re-save a stale `true` flag.
+- Automatic image-directory loading now reports malformed neighboring VOC/YOLO/JSON annotations instead of silently treating them as empty; malformed JSON is no longer accepted as an empty CreateML document.
+- Direction-key nudging now moves the complete selected shape set with one bounded delta, matching LabelMe's group movement instead of moving only the current shape.
+- `canvas.num_backups` controls the committed-shape undo history depth (clamped to a usable range), matching LabelMe's bounded backup stack.
+- Undo and redo restore only the shape snapshot; the Canvas and annotation-list selection are cleared afterward, matching LabelMe's `restore_last_shape()` plus `load_shapes()` flow. A subsequent destructive action therefore requires an explicit user selection.
+- `file_dock`, `flag_dock`, `label_dock`, and `shape_dock` YAML policies apply dock visibility and closable/movable/floatable features independently at startup; the label dock is the unique-label panel and the shape dock is the individual annotation list.
+- Configured `flags` are exposed as unchecked top-level LabelMe flag entries and survive image/annotation loading; nested `label_flags` entries are converted to the existing regex-based per-label defaults and applied to loaded or newly created shapes.
+- LabelMe config `label_flags` supports both indented mappings and YAML flow mappings such as `{dog: [occluded, truncated]}`.
+- Config writes retain standalone user comment lines while still applying structured default pruning and atomic replacement.
+- LabelMe YAML writes replace a non-mapping root (for example, a legacy top-level sequence) with a fresh mapping instead of failing on the old root; YAML 1.1 boolean-like label strings such as `yes`, `no`, `on`, and `off` are quoted so they round-trip as strings.
+- Common LabelMe command-line overrides are supported for `--labels`, `--flags`, `--label-flags`, `--language`, `--output`, `--no-auto-save`, `--with-image-data`, `--keep-prev`, and `--validate-label`; command-line values take precedence over the config file and make the Settings action report that the session is externally controlled.
+- LabelMe-style `--output <file>.json` selects the LabelMe format and uses that exact JSON file for the startup image; it is loaded again on restart and is never reused for a different image. Directory outputs continue to use one annotation file per image.
+- LabelMe CLI parity also includes `--epsilon`, `--no-sort-labels`, and `--version`/`-V`; canvas hit tolerance and label-dialog ordering are applied before opening the startup image.
+- The default zoom shortcuts now match LabelMe: `Ctrl++` and `Ctrl+=` zoom in, while `Ctrl+0` restores original size; the default committed-shape undo history is bounded to 10 snapshots like `canvas.num_backups`.
+- The title-bar toolbar now includes LabelMe's direct zoom-level widget: it accepts `1%` through `1600%`, has no spin buttons, exits fit mode on manual input, and stays synchronized with wheel, shortcut, fit, and per-image zoom restoration.
+- Shortcut zoom (`Ctrl++`, `Ctrl+-`, and `Ctrl+0`) now preserves the image point at the center of the visible viewport, matching LabelMe's zoom-request anchoring instead of shifting the viewed region.
+- Shortcut zoom uses LabelMe's multiplicative integer steps: `ceil(current * 1.1)` for zoom in and `floor(current * 0.9)` for zoom out, with the current viewport center retained as the anchor.
+- Ctrl+wheel zoom now uses the same LabelMe integer step policy (`ceil(current * 1.1)` / `floor(current * 0.9)`) while preserving the pointer anchor; plain and Shift+wheel scrolling remain unchanged.
+- The default draft fill color now matches LabelMe's `shape.fill_color` (`RGBA(0,0,0,64)`); explicit QSettings or YAML color values still take precedence.
+- Committed shapes now resolve both line and fill colors from the LabelMe label palette; selected shapes use the stronger label-color fill, hovered shapes use the normal palette fill, and idle shapes remain outline-only.
+- Canvas panning now supports LabelMe's middle-button drag in addition to the existing left/right drag paths; it uses the same drag threshold and never creates or moves a shape.
+- Editing selection follows LabelMe's click semantics: clicking an already selected shape preserves the current multi-selection while dragging, and a click without movement removes only that shape from the selection without marking geometry dirty.
+- Shape hit testing follows LabelMe's screen-space rules: line/linestrip hit distance uses the configured `epsilon` and current scale, point hit distance uses `point_size / 2`, and a `points` landmark collection is not hit as a filled container.
+- Deleting the current shape keeps the next shape selected; deleting the last shape wraps selection to the first remaining shape, and the Canvas selection-set signal stays synchronized with the active index.
+- The edit/context menu also exposes `Delete All Shapes`; it clears the current image in one history operation, refreshes both annotation lists, and restores the complete collection with one `Ctrl+Z`.
+- Loading a shape collection leaves all shapes unselected, matching LabelMe's explicit-click selection model; edit, delete, color, and metadata actions therefore stay inert until the user selects a shape.
+- Hidden shapes are excluded from Canvas hover, hit testing, vertex/edge insertion, and point removal, so visibility checkboxes also disable direct image editing as in LabelMe.
+- Hidden multi-point containers are also excluded from the fallback vertex-based `shapeAt` lookup; visibility filtering therefore cannot be bypassed by clicking a landmark point.
+- Point and multi-point markers are rendered in image coordinates like LabelMe, so they shrink naturally at low zoom while their screen-space hit tolerance remains usable.
+- Point and multi-point shapes now use a single LabelMe-style point marker when selected; the generic square vertex-handle overlay is omitted so selected landmarks do not become oversized.
+- Loaded-shape vertices, point markers, and oriented-rectangle handles now derive their RGB from the shape label color; selecting a shape changes its outline/fill without incorrectly recoloring its vertices to the selected-line color. Draft vertices continue to use the configured draft palette.
+- Direction-key nudging is limited to edit mode; residual selection state cannot move existing shapes while create or view mode is active.
+- Continuous Canvas edits are committed to the MainWindow undo history as one operation on mouse release; intermediate drag frames do not create one-step-per-pixel undo entries. Direction-key nudges emit the normal shape-change signal, so they mark the document dirty, participate in auto-save, and can be undone.
+- Rectangle, line, and circle creation drafts use the same single-operation history boundary, including label-prompt acceptance/cancellation; keyboard nudging uses LabelMe's five-pixel move speed and remains group-bounded.
+- Canvas wheel routing now matches LabelMe: `Ctrl+wheel` zooms around the pointer, plain wheel emits horizontal and vertical scroll requests, and `Shift+wheel` maps vertical wheel input to horizontal scrolling. The existing `Ctrl+Shift+wheel` brightness adjustment remains as a C++ viewer extension.
+- LabelMe save rejects top-level `other_data` entries that collide with reserved fields (`version`, `imagePath`, `imageData`, `shapes`, `flags`, `imageHeight`, `imageWidth`) instead of silently dropping them.
+- LabelMe save validates each declared embedded-image dimension independently, including files that declare only width or only height.
+- When a config file is opened without command-line overrides, accepted Settings changes are atomically written back to that YAML file; nested keys such as `canvas.fill_drawing` are rewritten without leaving stale duplicate keys.
+- LabelMe YAML settings writes now reject unknown target keys and non-mapping parent conflicts, and prune overrides that equal built-in defaults (including empty nested parents), leaving an empty file when the last override is removed.
+- The Settings dialog includes a multiline `labels` editor; accepted changes rebuild the predefined-label combo while retaining labels already learned in the current session, and persist the normalized configured list to the active LabelMe config file when one is present.
+- The Settings dialog now exposes LabelMe canvas interaction controls for hit-test tolerance, vertex point size, double-click polygon closure, first-vertex snapping, and rectangle crosshair; accepted values apply immediately and persist as `epsilon`, `shape.point_size`, and `canvas.*` YAML keys.
+- Legacy positional startup arguments remain compatible: `image-or-directory classFile saveDir`.
+- The last viewed image for each recent directory is persisted in `QSettings`; reopening that directory after restarting the application restores the remembered image, while the dimmed visited-file presentation remains session-only.
+- Window geometry restoration now checks all available screens and moves an off-screen saved window to the primary screen, matching LabelMe's recovery path after monitor changes.
+- Shape line/fill color actions now use the Canvas current selection as their source of truth, so a stale or separately focused annotation-list row cannot apply a color change to the wrong shape.
+- Horizontal and vertical Canvas scroll positions are kept per image during the session and restored when navigating back, matching LabelMe's per-image viewport state for large images.
+- Auto Save now persists its setting immediately and schedules a coalesced save while editing, so creating or modifying shapes writes the annotation without waiting for navigation or window close.
+- Auto Save follows LabelMe's default configuration and starts enabled unless the user has explicitly persisted it as disabled.
+- Filled polygon previews follow LabelMe's default configuration and start enabled unless explicitly disabled by the user.
+- Loading an image posts a temporary `Loaded image <filename>` status-bar message, while save operations leave the status bar quiet unless they have an explicit result to report.
+- LabelMe parse failures report `Failed to load <path>: <reason>` in the status bar, and failed VOC/YOLO/CreateML/LabelMe writes report `Failed to save <path>` instead of failing silently.
+- When an adjacent annotation fails to parse during image-directory navigation, normal Save and Auto Save are disabled to prevent overwriting the original broken file; Save As remains available for recovery.
+- The window title appends `*` while the annotation is dirty and removes it after a successful save; failed saves keep the dirty marker. Direct external annotation loading reports format/parse errors without replacing the current image.
+- Unsaved close/navigation now proceeds only when the selected save actually succeeds; a failed save keeps the current image open and preserves the dirty state, matching LabelMe's data-loss guard.
+- The file-list title bar now has LabelMe-style case-insensitive regular-expression filtering over the full image path; invalid expressions are ignored like LabelMe's `re.error` fallback, and the search composes with label filtering while reporting the visible/total count.
+- Polygon, linestrip, points, and AI point drafts can be completed with `Return`, `Space`, or a valid double-click, matching LabelMe's close-shape workflow.
+- LabelMe top-level flags now have a dedicated `Flags` dock with checkboxes; the existing text editor remains available for advanced flag entry and both paths share the same saved state.
+- Shape list rows now follow LabelMe's display convention: `label (group_id) [enabled_flag, ...]`; the raw label remains in item data so visibility filtering and inline edits are not affected by the presentation text.
+- The label list supports LabelMe-style internal drag-and-drop reordering; the new order is applied to canvas shapes, preserved in the next save, and recorded in the undo history.
+- Settings exposes LabelMe's `validate_label` policy (`Allow any label` or `Existing labels only`). Exact validation rejects unknown labels from both the edit dialog and inline label editing, with the selected shape left unchanged.
+- File-list rows are user-checkable like LabelMe's image list and reflect whether an XML, YOLO, CreateML, or LabelMe annotation file exists; saving refreshes the state.
+- Leaving the canvas clears shape/vertex/edge hover state and restores the mode-appropriate cursor, matching LabelMe's `leaveEvent` cleanup.
+- Losing keyboard focus releases temporary resize/move cursors and clears the transient status text without modifying the current annotation, matching LabelMe's `focusOutEvent` behavior.
+- Re-entering the Canvas reapplies the active mode cursor: create mode restores the crosshair, while edit and view modes restore the standard arrow until hover hit-testing supplies a more specific cursor.
+- The File menu can delete the current annotation file after confirmation; the image remains open while the canvas, label list, and file-list check state are cleared.
+- Save As now follows the active annotation format when choosing a path: it starts in the current output/image directory, filters the matching annotation type, preselects the current image basename, and applies the correct default suffix (`.xml`, `.txt`, or `.json`).
+- LabelMe's default creation shortcuts are available alongside the existing compatibility shortcuts: `Ctrl+N` creates a polygon and `Ctrl+R` creates a rectangle, while `P`/`W` remain valid; changing the output directory uses `Ctrl+Shift+R` to avoid stealing the rectangle shortcut.
+- The frameless title-bar toolbar now follows LabelMe's primary action order: open, open directory, previous/next image, save, delete annotation, open-with, mode selector, label/edit/duplicate/delete/undo/redo, brightness/contrast, fit/zoom, verify, auto-save, and advanced view tools. File menu actions remain equivalent access paths, while save-directory and format controls stay in their dedicated menu/footer locations.
+- `Close current file` now follows LabelMe's reset behavior: it clears the active image/annotation state, disables the canvas, and reopening an image re-enables editing.
+- `openAnnotation(path)` now provides a direct annotation-entry API; external LabelMe JSON is detected by its required fields and remains the save target, while CreateML JSON arrays are detected separately.
+- External VOC/YOLO/CreateML files opened through `openAnnotation(path)` also remain the save target for that format; switching formats intentionally falls back to the image-based output path.
+- The Canvas context menu now exposes LabelMe's full drawing-mode set (polygon, rectangle, oriented rectangle, circle, point/points, line/linestrip, AI prompts, and mask) plus edit mode, duplicate, shape clipboard copy/paste, delete, undo, undo-last-point, polygon point operations, and the existing copy/move-to-position commands.
+- The Help menu now includes LabelMe's Tutorial entry and opens the official tutorial page through the system browser; its text participates in the same live language refresh as the existing Information and Shortcuts entries.
+- Right-drag now follows LabelMe's shape-placement behavior when the press starts on a selected shape: the dragged outline is kept as a preview and the context menu commits either Copy here or Move here. Empty-image right-drag remains viewport panning with the existing global-coordinate delta logic, and a short right click still opens the normal context menu.
+- Right-drag previews now ignore cursor positions outside the pixmap instead of clamping the temporary copy to the image edge; re-entering the image therefore keeps the last valid preview position, matching LabelMe's `_drag_shapes` contract.
+- Duplicate and delete actions now use the Canvas selection as the source of truth. Duplicate Shapes creates exact geometry copies without the legacy 5-pixel offset, and a stale label-list current row cannot redirect an operation to a different shape.
+- The annotation list now explicitly scrolls to the Canvas current shape after selection and refresh synchronization. The `difficult` toggle also follows the Canvas current index, so a stale list-row highlight cannot edit a different annotation.
+- The label editor now focuses and selects the current label text when opened, matching LabelMe's replace-ready popup workflow.
+- Editing and deletion actions now use only the Canvas selection as their enablement source. A stale or temporarily highlighted label-list row no longer enables an operation on an annotation that is not selected on the image.
+- The edit and delete slots enforce the same Canvas-selection rule internally; a queued or direct action invocation cannot fall back to a merely highlighted annotation-list row.
+- Save is disabled after a clean image/annotation load and becomes enabled only after the document is dirty, while Save As remains available for clean documents.
+- Edit mode is disabled while LabelMe-style drawing has an active draft; cancelling or completing the draft restores the action state through Canvas drawing-state synchronization.
+- Remove Selected Point is enabled only while the cursor is over a removable polygon/linestrip vertex; Canvas now reports vertex-hover state separately from edge-hover state and clears both when the pointer leaves the canvas.
+- Moving the pointer from a polygon/linestrip vertex to empty canvas space now clears the vertex-hover action immediately, without requiring a leave/re-enter event.
+- Switching from edit mode into create mode now clears the active shape selection and transient vertex/edge handles immediately, matching LabelMe's mode transition instead of carrying an old selection into the new draft.
+- While a drawing draft is active, all existing-shape edit actions (label edit, delete, duplicate, copy/paste, placement, and color changes) are disabled; they are restored after the draft is cancelled or committed.
+- The multi-shape label editor now disables its label history list together with the label field when selected shapes have different labels, matching LabelMe's read-only mixed-label workflow.
+- Annotation-list rows now use the LabelMe color-dot convention without tinting the whole row, leaving the native selection background visually distinct.
+- Shape clipboard copy now publishes a standard LabelMe-compatible JSON array through both plain text and `application/x-labelme-shapes`; paste accepts that payload from another window or process while retaining the in-process fallback.
+
+## Remaining Gap
+
+- Application-level ShapeClipboard still owns the in-process fallback for malformed or legacy clipboard payloads; standard LabelMe JSON clipboard exchange is implemented for valid Shape arrays.
+- The optional `cpp/tools/labelme_ai_bridge.py` defines a LabelMe/OSAM-compatible point-prompt and text-prompt protocol and converts model annotations to rectangle, polygon, mask, oriented-rectangle, or circle shapes. The Qt `AI 点提示` and `AI 框提示` modes invoke this bridge asynchronously, sort detections by score, inherit the prompt label/metadata, suppress overlaps with existing annotations and same-label fresh detections, and cancel the temporary prompt when no new result remains. They fall back to the original prompt shape on a structured runtime error. The `AI 文本提示` panel follows LabelMe's comma-separated text workflow, exposes `SAM3`/`YOLO-World`, score and IoU thresholds, maps text and score into `label`/`description`, and uses the same geometry-aware duplicate suppression. `osam` remains optional and reports its absence instead of producing a false annotation.
+- AI prompts now use a long-lived JSON-lines `AiAssistSession` in the Qt process. The bridge accepts `--server`, caches loaded OSAM models and up to three image embeddings per model like LabelMe's `OsamSession`, and keeps one request asynchronous at a time; switching the configured bridge path restarts the session cleanly. One-shot stdin remains supported for external scripts and deployment compatibility.
+- AI model preparation now streams LabelMe-style file progress events through the JSON-lines bridge; the label panel shows determinate byte progress when available and provides a cancel button that terminates the active request without accepting a partial response.
+- Large images now open through a bounded `QImageReader` preview (maximum display side 4096) while `Canvas` keeps the original image dimensions for annotation coordinates, fit modes, minimap mapping, and save output. When manual zoom reaches 50%, the current image is upgraded to the full-resolution display bitmap without dropping shapes, selection, brightness, contrast, or scroll position; file thumbnails use the same bounded read and still draw annotation boxes.
+- AI bridge results are materialized with LabelMe's closed runtime-shape semantics before they are inserted into the canvas, so polygon-like AI/plugin output is immediately selectable and vertex-editable instead of being treated as a rectangle-only fallback.
+- The AI bridge now prepares an OSAM model before inference: cached models are instantiated directly, while an uncached model runs its `pull()` step once before the prompt request, matching LabelMe's automatic model-download behavior. Missing OSAM or download failures still return the existing structured error instead of creating an annotation.
+- The standalone AI bridge now performs the same score-ordered, same-label greedy suppression as LabelMe before serializing point/text detections; inconsistent mask-to-bbox extents are rejected instead of producing unreliable geometry.
+- AI text-prompt suppression now matches LabelMe's existing-shape scope: only an existing shape with the requested label and output geometry type can block a new detection; unrelated labels no longer suppress it.
+- Polygon edge insertion now uses LabelMe's destination-vertex indexing, including inserting a point on the closing edge at index 0; equal-distance edge hits keep the first matching edge.
+- `Alt` topology editing now follows LabelMe's hover priority: a vertex hit wins over a nearby edge, so `Alt`-clicking an existing vertex never inserts a duplicate point.
+- Canvas hover and press resolution now follows LabelMe's global priority order: all visible vertices are checked before rotation handles, resize borders, and filled-shape hits. This prevents a higher-layer rectangle edge from swallowing a coincident lower-layer polygon vertex while preserving the native side-resize handles.
+- The shared `Shape::contains()` helper now follows LabelMe's rolled edge lookup for `linestrip`, including the last-to-first closing segment while leaving the actual rendered polyline open.
+- Imported two-point polygons remain topology-editable: edge hover and `Alt` insertion expose the same open and closing segments as LabelMe instead of rejecting the shape solely because normal creation requires three points.
+- Holding `Alt` while drawing temporarily disables polygon first-vertex snapping, including when the pointer is stationary; releasing it restores the configured snapping preference.
+- AI point-prompt mode disables models without point-prompt support (currently `sam3:latest`) and falls back to `sam2:latest` when an unsupported model was persisted; AI box-prompt mode restores the full model list.
+- AI bridge mask responses now require a decodable base64 PNG before entering the canvas, matching LabelMe's mask loader instead of accepting malformed payloads as editable annotations.
+- AI bridge mask responses also require the PNG dimensions to equal the bbox's inclusive pixel extent, matching LabelMe's OSAM suppression contract and preventing shifted mask geometry.
+- AI mask responses must include a non-empty `mask_data` payload; missing or null masks are rejected instead of entering the canvas as empty native masks.
+- AI bridge responses now enforce LabelMe's type-specific geometry contract: rectangles, masks, and circles require two points, oriented rectangles require four, and polygons require at least two.
+- The remaining output difference is limited to JSON escaping details handled by Qt's UTF-8 serializer; field order, indentation, and semantic values now match the reference writer.

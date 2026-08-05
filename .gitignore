@@ -7,6 +7,10 @@ labelImg.egg-info*
 
 build/
 dist/
+target/*
+!target/.gitkeep
+refs/
+tests/tests.json
 
 tags
 cscope*
