@@ -109,6 +109,7 @@ void FramelessTitleBar::setToolWidget(QWidget *widget) {
 }
 
 bool FramelessTitleBar::eventFilter(QObject *watched, QEvent *event) {
+#ifndef Q_OS_WIN
     if (m_toolWidget && event->type() == QEvent::MouseButtonDblClick) {
         auto *widget = qobject_cast<QWidget *>(watched);
         auto *mouseEvent = static_cast<QMouseEvent *>(event);
@@ -120,19 +121,26 @@ bool FramelessTitleBar::eventFilter(QObject *watched, QEvent *event) {
             return true;
         }
     }
+#endif
     return QFrame::eventFilter(watched, event);
 }
 
 void FramelessTitleBar::mouseDoubleClickEvent(QMouseEvent *event) {
+#ifndef Q_OS_WIN
     if (event->button() == Qt::LeftButton) {
         emit maximizeRestoreRequested();
         event->accept();
         return;
     }
+#endif
     QFrame::mouseDoubleClickEvent(event);
 }
 
 void FramelessTitleBar::mouseMoveEvent(QMouseEvent *event) {
+#ifdef Q_OS_WIN
+    QFrame::mouseMoveEvent(event);
+    return;
+#else
     if (!(event->buttons() & Qt::LeftButton) || m_dragStarted) {
         QFrame::mouseMoveEvent(event);
         return;
@@ -146,6 +154,7 @@ void FramelessTitleBar::mouseMoveEvent(QMouseEvent *event) {
         return;
     }
     QFrame::mouseMoveEvent(event);
+#endif
 }
 
 void FramelessTitleBar::mousePressEvent(QMouseEvent *event) {

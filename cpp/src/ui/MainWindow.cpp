@@ -6702,7 +6702,6 @@ void MainWindow::toggleMaximizeRestore() {
     } else {
         showMaximized();
     }
-    updateFramelessChrome();
 }
 
 void MainWindow::updateFramelessChrome() {
@@ -7099,9 +7098,23 @@ bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr
     case WindowHitRegion::Caption: {
         QWidget *child = childAt(localPosition);
         for (QWidget *widget = child; widget; widget = widget->parentWidget()) {
-            if (qobject_cast<QToolButton *>(widget) || qobject_cast<QMenuBar *>(widget) ||
-                qobject_cast<QToolBar *>(widget) || widget == m_titleToolContainer) {
-                return QMainWindow::nativeEvent(eventType, message, result);
+            if (qobject_cast<QAbstractButton *>(widget) || qobject_cast<QComboBox *>(widget) ||
+                qobject_cast<QLineEdit *>(widget) || qobject_cast<QAbstractSpinBox *>(widget) ||
+                qobject_cast<QAbstractSlider *>(widget)) {
+                *result = HTCLIENT;
+                return true;
+            }
+            if (auto *menu = qobject_cast<QMenuBar *>(widget)) {
+                if (menu->actionAt(menu->mapFrom(this, localPosition))) {
+                    *result = HTCLIENT;
+                    return true;
+                }
+            }
+            if (auto *toolbar = qobject_cast<QToolBar *>(widget)) {
+                if (toolbar->actionAt(toolbar->mapFrom(this, localPosition))) {
+                    *result = HTCLIENT;
+                    return true;
+                }
             }
             if (widget == m_titleBar) {
                 break;

@@ -158,6 +158,9 @@ private slots:
     void mainWindowUsesFramelessChrome();
     void mainWindowNativeStyleSupportsResizeAndSnap();
     void mainWindowNativeHitTestSupportsEveryResizeEdge();
+    void mainWindowNativeCaptionExcludesInteractiveTitleControls();
+    void mainWindowWindowsTitleBarDoesNotUseQtDoubleClickFallback();
+    void mainWindowNativeCaptionDoubleClickChangesStateOnce();
     void mainWindowUsesGeneratedCppIcon();
     void mainWindowEmbedsToolbarIntoFramelessTitleBar();
     void mainWindowTitleToolAreaDoubleClickTogglesMaximize();
@@ -4270,6 +4273,23 @@ LRESULT nativeHitTest(HWND hwnd, int screenX, int screenY) {
     const LPARAM point = MAKELPARAM(static_cast<short>(screenX), static_cast<short>(screenY));
     return SendMessageW(hwnd, WM_NCHITTEST, 0, point);
 }
+
+POINT nativeScreenPointAtWidgetPoint(MainWindow *window, QWidget *widget, const QPoint &widgetPosition) {
+    const HWND hwnd = reinterpret_cast<HWND>(window->winId());
+    const qreal nativeScale = qMax<qreal>(1.0, static_cast<qreal>(GetDpiForWindow(hwnd)) / 96.0);
+    const QPoint logicalClientPosition = widget->mapTo(window, widgetPosition);
+    POINT nativeClientPosition{
+        qRound(logicalClientPosition.x() * nativeScale),
+        qRound(logicalClientPosition.y() * nativeScale),
+    };
+    ClientToScreen(hwnd, &nativeClientPosition);
+    return nativeClientPosition;
+}
+
+LRESULT nativeHitTestAtWidgetPoint(MainWindow *window, QWidget *widget, const QPoint &widgetPosition) {
+    const POINT screenPosition = nativeScreenPointAtWidgetPoint(window, widget, widgetPosition);
+    return nativeHitTest(reinterpret_cast<HWND>(window->winId()), screenPosition.x, screenPosition.y);
+}
 #endif
 
 void UiTests::mainWindowNativeStyleSupportsResizeAndSnap() {
@@ -4328,6 +4348,137 @@ void UiTests::mainWindowNativeHitTestSupportsEveryResizeEdge() {
 #endif
 }
 
+void UiTests::mainWindowNativeCaptionExcludesInteractiveTitleControls() {
+#ifndef Q_OS_WIN
+    QSKIP("Native caption hit testing is Windows-specific");
+#else
+    resetTestSettings("native-title-caption-hit-test");
+    MainWindow window;
+    window.resize(1000, 650);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+    auto *titleBar = window.findChild<FramelessTitleBar *>(QStringLiteral("framelessTitleBar"));
+    auto *toolBar = window.findChild<QToolBar *>(QStringLiteral("mainToolBar"));
+    auto *menuBar = window.findChild<QMenuBar *>();
+    auto *maximizeButton = window.findChild<QToolButton *>(QStringLiteral("maximizeButton"));
+    QVERIFY(titleBar);
+    QVERIFY(toolBar);
+    QVERIFY(menuBar);
+    QVERIFY(maximizeButton);
+
+    QPoint menuBlankPosition;
+    for (int x = menuBar->width() - 2; x >= 0; --x) {
+        const QPoint candidate(x, menuBar->height() / 2);
+        if (!menuBar->actionAt(candidate)) {
+            menuBlankPosition = candidate;
+            break;
+        }
+    }
+    QVERIFY(!menuBlankPosition.isNull());
+
+    QPoint toolBlankPosition;
+    for (int x = toolBar->width() - 2; x >= 0; --x) {
+        const QPoint candidate(x, toolBar->height() / 2);
+        if (!toolBar->actionAt(candidate) && !qobject_cast<QAbstractButton *>(toolBar->childAt(candidate))) {
+            toolBlankPosition = candidate;
+            break;
+        }
+    }
+    QVERIFY(!toolBlankPosition.isNull());
+
+    QAction *firstMenuAction = menuBar->actions().value(0);
+    QVERIFY(firstMenuAction);
+    const QPoint menuActionPosition = menuBar->actionGeometry(firstMenuAction).center();
+
+    QToolButton *actionButton = nullptr;
+    for (QToolButton *button : toolBar->findChildren<QToolButton *>()) {
+        if (button->isVisible() && button->defaultAction()) {
+            actionButton = button;
+            break;
+        }
+    }
+    QVERIFY(actionButton);
+
+    QCOMPARE(nativeHitTestAtWidgetPoint(&window, menuBar, menuBlankPosition),
+             static_cast<LRESULT>(HTCAPTION));
+    QCOMPARE(nativeHitTestAtWidgetPoint(&window, toolBar, toolBlankPosition),
+             static_cast<LRESULT>(HTCAPTION));
+    QCOMPARE(nativeHitTestAtWidgetPoint(&window, menuBar, menuActionPosition),
+             static_cast<LRESULT>(HTCLIENT));
+    QCOMPARE(nativeHitTestAtWidgetPoint(&window, actionButton, actionButton->rect().center()),
+             static_cast<LRESULT>(HTCLIENT));
+    QCOMPARE(nativeHitTestAtWidgetPoint(&window, maximizeButton, maximizeButton->rect().center()),
+             static_cast<LRESULT>(HTCLIENT));
+#endif
+}
+
+void UiTests::mainWindowWindowsTitleBarDoesNotUseQtDoubleClickFallback() {
+#ifndef Q_OS_WIN
+    QSKIP("Windows uses native caption double-click handling");
+#else
+    resetTestSettings("native-title-double-click-owner");
+    MainWindow window;
+    window.resize(900, 600);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+    auto *titleBar = window.findChild<FramelessTitleBar *>(QStringLiteral("framelessTitleBar"));
+    auto *toolBar = window.findChild<QToolBar *>(QStringLiteral("mainToolBar"));
+    QVERIFY(titleBar);
+    QVERIFY(toolBar);
+    QSignalSpy maximizeRequests(titleBar, &FramelessTitleBar::maximizeRestoreRequested);
+
+    QTest::mouseDClick(titleBar, Qt::LeftButton, Qt::NoModifier, QPoint(24, titleBar->height() / 2));
+    QTest::mouseDClick(toolBar, Qt::LeftButton, Qt::NoModifier,
+                      QPoint(toolBar->width() - 4, toolBar->height() / 2));
+
+    QCOMPARE(maximizeRequests.count(), 0);
+    QVERIFY(!window.isMaximized());
+#endif
+}
+
+void UiTests::mainWindowNativeCaptionDoubleClickChangesStateOnce() {
+#ifndef Q_OS_WIN
+    QSKIP("Native caption double-click handling is Windows-specific");
+#else
+    resetTestSettings("native-caption-double-click-state");
+    MainWindow window;
+    window.resize(900, 600);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QVERIFY(window.windowHandle());
+
+    auto *menuBar = window.findChild<QMenuBar *>();
+    QVERIFY(menuBar);
+    QPoint blankPosition;
+    for (int x = menuBar->width() - 2; x >= 0; --x) {
+        const QPoint candidate(x, menuBar->height() / 2);
+        if (!menuBar->actionAt(candidate)) {
+            blankPosition = candidate;
+            break;
+        }
+    }
+    QVERIFY(!blankPosition.isNull());
+    QCOMPARE(nativeHitTestAtWidgetPoint(&window, menuBar, blankPosition),
+             static_cast<LRESULT>(HTCAPTION));
+
+    const HWND hwnd = reinterpret_cast<HWND>(window.winId());
+    const POINT screenPosition = nativeScreenPointAtWidgetPoint(&window, menuBar, blankPosition);
+    const LPARAM messagePosition = MAKELPARAM(static_cast<short>(screenPosition.x),
+                                              static_cast<short>(screenPosition.y));
+    QSignalSpy stateChanges(window.windowHandle(), &QWindow::windowStateChanged);
+
+    SendMessageW(hwnd, WM_NCLBUTTONDBLCLK, HTCAPTION, messagePosition);
+    QTRY_VERIFY(window.isMaximized());
+    QCOMPARE(stateChanges.count(), 1);
+
+    SendMessageW(hwnd, WM_NCLBUTTONDBLCLK, HTCAPTION, messagePosition);
+    QTRY_VERIFY(!window.isMaximized());
+    QCOMPARE(stateChanges.count(), 2);
+#endif
+}
+
 void UiTests::mainWindowUsesGeneratedCppIcon() {
     resetTestSettings("generated-cpp-icon");
     MainWindow window;
@@ -4362,16 +4513,58 @@ void UiTests::mainWindowTitleToolAreaDoubleClickTogglesMaximize() {
     QVERIFY(menuBar);
     QVERIFY(!window.isMaximized());
 
+#ifdef Q_OS_WIN
+    auto blankPosition = [](QWidget *widget, const std::function<QAction *(const QPoint &)> &actionAt) {
+        for (int x = widget->width() - 2; x >= 0; --x) {
+            const QPoint candidate(x, widget->height() / 2);
+            if (!actionAt(candidate)) {
+                return candidate;
+            }
+        }
+        return QPoint();
+    };
+    const QPoint menuBlank = blankPosition(menuBar, [menuBar](const QPoint &point) {
+        return menuBar->actionAt(point);
+    });
+    const QPoint toolBlank = blankPosition(toolBar, [toolBar](const QPoint &point) {
+        return toolBar->actionAt(point);
+    });
+    QVERIFY(!menuBlank.isNull());
+    QVERIFY(!toolBlank.isNull());
+
+    auto nativeDoubleClick = [&window](QWidget *widget, const QPoint &position) {
+        const HWND hwnd = reinterpret_cast<HWND>(window.winId());
+        const POINT screenPosition = nativeScreenPointAtWidgetPoint(&window, widget, position);
+        const LPARAM messagePosition = MAKELPARAM(static_cast<short>(screenPosition.x),
+                                                  static_cast<short>(screenPosition.y));
+        SendMessageW(hwnd, WM_NCLBUTTONDBLCLK, HTCAPTION, messagePosition);
+    };
+
+    nativeDoubleClick(menuBar, menuBlank);
+#else
     QTest::mouseDClick(menuBar, Qt::LeftButton, Qt::NoModifier, menuBar->rect().center());
+#endif
     QTRY_VERIFY(window.isMaximized());
 
+#ifdef Q_OS_WIN
+    nativeDoubleClick(menuBar, menuBlank);
+#else
     QTest::mouseDClick(menuBar, Qt::LeftButton, Qt::NoModifier, menuBar->rect().center());
+#endif
     QTRY_VERIFY(!window.isMaximized());
 
+#ifdef Q_OS_WIN
+    nativeDoubleClick(toolBar, toolBlank);
+#else
     QTest::mouseDClick(toolBar, Qt::LeftButton, Qt::NoModifier, QPoint(toolBar->width() - 8, toolBar->height() / 2));
+#endif
     QTRY_VERIFY(window.isMaximized());
 
+#ifdef Q_OS_WIN
+    nativeDoubleClick(toolBar, toolBlank);
+#else
     QTest::mouseDClick(toolBar, Qt::LeftButton, Qt::NoModifier, QPoint(toolBar->width() - 8, toolBar->height() / 2));
+#endif
     QTRY_VERIFY(!window.isMaximized());
 }
 
