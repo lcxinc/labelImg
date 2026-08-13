@@ -3,6 +3,7 @@
 #include "core/ResourcePaths.h"
 #include "core/AiAssistBridge.h"
 #include "core/ImageIO.h"
+#include "core/WindowChrome.h"
 
 #include <QAbstractButton>
 #include <QApplication>
@@ -463,37 +464,6 @@ bool sameShapesForHistory(const QVector<Shape> &left, const QVector<Shape> &righ
     return true;
 }
 
-enum class HitRegion {
-    Client,
-    Caption,
-    Left,
-    Right,
-    Top,
-    Bottom,
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
-};
-
-HitRegion hitRegionFor(const QRect &windowFrame, const QRect &titleFrame, const QPoint &globalPos, int border) {
-    const bool left = globalPos.x() >= windowFrame.left() && globalPos.x() < windowFrame.left() + border;
-    const bool right = globalPos.x() <= windowFrame.right() && globalPos.x() > windowFrame.right() - border;
-    const bool top = globalPos.y() >= windowFrame.top() && globalPos.y() < windowFrame.top() + border;
-    const bool bottom = globalPos.y() <= windowFrame.bottom() && globalPos.y() > windowFrame.bottom() - border;
-
-    if (top && left) return HitRegion::TopLeft;
-    if (top && right) return HitRegion::TopRight;
-    if (bottom && left) return HitRegion::BottomLeft;
-    if (bottom && right) return HitRegion::BottomRight;
-    if (left) return HitRegion::Left;
-    if (right) return HitRegion::Right;
-    if (top) return HitRegion::Top;
-    if (bottom) return HitRegion::Bottom;
-    if (titleFrame.contains(globalPos)) return HitRegion::Caption;
-    return HitRegion::Client;
-}
-
 bool naturalPathLess(const QString &left, const QString &right) {
     const QString a = left.toLower();
     const QString b = right.toLower();
@@ -752,6 +722,7 @@ MainWindow::MainWindow(QWidget *parent, const QString &defaultConfigPath)
     createActions();
     createMenusAndToolbars();
     installFramelessChrome();
+    applyNativeWindowChrome();
     m_defaultDockState = saveState(DockStateVersion);
     connectSignals();
     m_aiSession = new AiAssistSession(this);
@@ -2291,6 +2262,31 @@ void MainWindow::installFramelessChrome() {
     connect(m_titleBar, &FramelessTitleBar::closeRequested, this, &QWidget::close);
 
     updateFramelessChrome();
+}
+
+void MainWindow::applyNativeWindowChrome() {
+#ifdef Q_OS_WIN
+    const HWND hwnd = reinterpret_cast<HWND>(winId());
+    if (!hwnd) {
+        return;
+    }
+
+    const LONG_PTR currentStyle = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    const LONG_PTR nextStyle = static_cast<LONG_PTR>(
+        withWindowsWindowChromeStyle(static_cast<quintptr>(currentStyle)));
+    if (nextStyle == currentStyle) {
+        return;
+    }
+
+    SetWindowLongPtrW(hwnd, GWL_STYLE, nextStyle);
+    SetWindowPos(hwnd,
+                 nullptr,
+                 0,
+                 0,
+                 0,
+                 0,
+                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+#endif
 }
 
 void MainWindow::connectSignals() {
@@ -6706,7 +6702,6 @@ void MainWindow::toggleMaximizeRestore() {
     } else {
         showMaximized();
     }
-    updateFramelessChrome();
 }
 
 void MainWindow::updateFramelessChrome() {
@@ -7063,42 +7058,63 @@ bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr
         return QMainWindow::nativeEvent(eventType, message, result);
     }
 
-    const int border = 8;
-    const QPoint globalPos(GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam));
-    const QRect titleFrame(m_titleBar->mapToGlobal(QPoint(0, 0)), m_titleBar->size());
-    const HitRegion region = hitRegionFor(frameGeometry(), titleFrame, globalPos, border);
+    const HWND hwnd = reinterpret_cast<HWND>(winId());
+    POINT nativeClientPosition{GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam)};
+    if (!hwnd || !ScreenToClient(hwnd, &nativeClientPosition)) {
+        return QMainWindow::nativeEvent(eventType, message, result);
+    }
+
+    const qreal nativeScale = qMax<qreal>(1.0, static_cast<qreal>(GetDpiForWindow(hwnd)) / 96.0);
+    const QPoint localPosition(qRound(nativeClientPosition.x / nativeScale),
+                               qRound(nativeClientPosition.y / nativeScale));
+    const QRect titleFrame(m_titleBar->mapTo(this, QPoint(0, 0)), m_titleBar->size());
+    const WindowHitRegion region = windowHitRegion(rect(), titleFrame, localPosition, 8);
 
     switch (region) {
-    case HitRegion::TopLeft:
+    case WindowHitRegion::TopLeft:
         *result = HTTOPLEFT;
         return true;
-    case HitRegion::TopRight:
+    case WindowHitRegion::TopRight:
         *result = HTTOPRIGHT;
         return true;
-    case HitRegion::BottomLeft:
+    case WindowHitRegion::BottomLeft:
         *result = HTBOTTOMLEFT;
         return true;
-    case HitRegion::BottomRight:
+    case WindowHitRegion::BottomRight:
         *result = HTBOTTOMRIGHT;
         return true;
-    case HitRegion::Left:
+    case WindowHitRegion::Left:
         *result = HTLEFT;
         return true;
-    case HitRegion::Right:
+    case WindowHitRegion::Right:
         *result = HTRIGHT;
         return true;
-    case HitRegion::Top:
+    case WindowHitRegion::Top:
         *result = HTTOP;
         return true;
-    case HitRegion::Bottom:
+    case WindowHitRegion::Bottom:
         *result = HTBOTTOM;
         return true;
-    case HitRegion::Caption: {
-        QWidget *child = childAt(mapFromGlobal(globalPos));
+    case WindowHitRegion::Caption: {
+        QWidget *child = childAt(localPosition);
         for (QWidget *widget = child; widget; widget = widget->parentWidget()) {
-            if (qobject_cast<QToolButton *>(widget) || qobject_cast<QMenuBar *>(widget) ||
-                qobject_cast<QToolBar *>(widget) || widget == m_titleToolContainer) {
-                return QMainWindow::nativeEvent(eventType, message, result);
+            if (qobject_cast<QAbstractButton *>(widget) || qobject_cast<QComboBox *>(widget) ||
+                qobject_cast<QLineEdit *>(widget) || qobject_cast<QAbstractSpinBox *>(widget) ||
+                qobject_cast<QAbstractSlider *>(widget)) {
+                *result = HTCLIENT;
+                return true;
+            }
+            if (auto *menu = qobject_cast<QMenuBar *>(widget)) {
+                if (menu->actionAt(menu->mapFrom(this, localPosition))) {
+                    *result = HTCLIENT;
+                    return true;
+                }
+            }
+            if (auto *toolbar = qobject_cast<QToolBar *>(widget)) {
+                if (toolbar->actionAt(toolbar->mapFrom(this, localPosition))) {
+                    *result = HTCLIENT;
+                    return true;
+                }
             }
             if (widget == m_titleBar) {
                 break;
@@ -7107,7 +7123,7 @@ bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr
         *result = HTCAPTION;
         return true;
     }
-    case HitRegion::Client:
+    case WindowHitRegion::Client:
         break;
     }
 #endif

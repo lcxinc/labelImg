@@ -20,6 +20,7 @@
 #include "core/PerformanceMonitor.h"
 #include "core/ResourcePaths.h"
 #include "core/StringBundle.h"
+#include "core/WindowChrome.h"
 
 class CoreTests : public QObject {
     Q_OBJECT
@@ -97,6 +98,8 @@ private slots:
     void shapeOverlapSkipsUnknownPluginTypesLikeLabelMe();
     void polygonShapeSupportsPointInsertionAndRemovalRules();
     void performanceMonitorReturnsCpuAndMemoryText();
+    void windowChromeStyleAddsStandardResizeAndSnapBits();
+    void windowChromeHitRegionsUseLocalLogicalCoordinates();
     void imageIoNormalizesHighBitGrayscale();
     void imageIoReadsBoundedPreview();
     void imageIoPreviewPreservesExifDisplaySize();
@@ -2835,6 +2838,32 @@ void CoreTests::performanceMonitorReturnsCpuAndMemoryText() {
     QVERIFY(text.contains("CPU"));
     QVERIFY(text.contains("MEM"));
     QVERIFY(!text.isEmpty());
+}
+
+void CoreTests::windowChromeStyleAddsStandardResizeAndSnapBits() {
+    constexpr quintptr existingStyle = 0x80000000;
+    const quintptr styled = withWindowsWindowChromeStyle(existingStyle);
+
+    QVERIFY(hasWindowsWindowChromeStyle(styled));
+    QCOMPARE(styled & existingStyle, existingStyle);
+    QCOMPARE(styled & windowsWindowChromeStyleMask(), windowsWindowChromeStyleMask());
+}
+
+void CoreTests::windowChromeHitRegionsUseLocalLogicalCoordinates() {
+    const QRect windowRect(0, 0, 800, 600);
+    const QRect titleRect(0, 0, 800, 34);
+    constexpr int border = 8;
+
+    QCOMPARE(windowHitRegion(windowRect, titleRect, QPoint(1, 1), border), WindowHitRegion::TopLeft);
+    QCOMPARE(windowHitRegion(windowRect, titleRect, QPoint(798, 1), border), WindowHitRegion::TopRight);
+    QCOMPARE(windowHitRegion(windowRect, titleRect, QPoint(1, 598), border), WindowHitRegion::BottomLeft);
+    QCOMPARE(windowHitRegion(windowRect, titleRect, QPoint(798, 598), border), WindowHitRegion::BottomRight);
+    QCOMPARE(windowHitRegion(windowRect, titleRect, QPoint(1, 300), border), WindowHitRegion::Left);
+    QCOMPARE(windowHitRegion(windowRect, titleRect, QPoint(798, 300), border), WindowHitRegion::Right);
+    QCOMPARE(windowHitRegion(windowRect, titleRect, QPoint(400, 1), border), WindowHitRegion::Top);
+    QCOMPARE(windowHitRegion(windowRect, titleRect, QPoint(400, 598), border), WindowHitRegion::Bottom);
+    QCOMPARE(windowHitRegion(windowRect, titleRect, QPoint(400, 20), border), WindowHitRegion::Caption);
+    QCOMPARE(windowHitRegion(windowRect, titleRect, QPoint(400, 300), border), WindowHitRegion::Client);
 }
 
 void CoreTests::imageIoNormalizesHighBitGrayscale() {

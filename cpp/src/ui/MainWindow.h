@@ -164,6 +164,7 @@ private:
     void createFooterControls();
     void connectSignals();
     void installFramelessChrome();
+    void applyNativeWindowChrome();
     void startSystemMove();
     void toggleMaximizeRestore();
     void updateFramelessChrome();
