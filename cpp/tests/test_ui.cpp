@@ -357,6 +357,10 @@ void resetTestSettings(const QString &name) {
     settings.clear();
 }
 
+bool usesWindowsQpa() {
+    return QGuiApplication::platformName().compare(QStringLiteral("windows"), Qt::CaseInsensitive) == 0;
+}
+
 QAction *actionByShortcut(QObject *root, const QKeySequence &shortcut) {
     const QList<QAction *> actions = root->findChildren<QAction *>();
     for (QAction *action : actions) {
@@ -4293,6 +4297,12 @@ LRESULT nativeHitTestAtWidgetPoint(MainWindow *window, QWidget *widget, const QP
 #endif
 
 void UiTests::mainWindowNativeStyleSupportsResizeAndSnap() {
+#ifndef Q_OS_WIN
+    QSKIP("Native resize and snap styles are Windows-specific");
+#else
+    if (!usesWindowsQpa()) {
+        QSKIP("Requires the Windows QPA plugin");
+    }
     resetTestSettings("native-resize-snap-style");
     MainWindow window;
     window.resize(900, 600);
@@ -4302,7 +4312,6 @@ void UiTests::mainWindowNativeStyleSupportsResizeAndSnap() {
     QVERIFY(window.maximumWidth() > window.width());
     QVERIFY(window.maximumHeight() > window.height());
 
-#ifdef Q_OS_WIN
     const HWND hwnd = reinterpret_cast<HWND>(window.winId());
     QVERIFY(hwnd);
     const quintptr style = static_cast<quintptr>(GetWindowLongPtrW(hwnd, GWL_STYLE));
@@ -4316,6 +4325,9 @@ void UiTests::mainWindowNativeHitTestSupportsEveryResizeEdge() {
 #ifndef Q_OS_WIN
     QSKIP("Native resize hit testing is Windows-specific");
 #else
+    if (!usesWindowsQpa()) {
+        QSKIP("Requires the Windows QPA plugin");
+    }
     resetTestSettings("native-resize-hit-test");
     MainWindow window;
     window.resize(900, 600);
@@ -4352,6 +4364,9 @@ void UiTests::mainWindowNativeCaptionExcludesInteractiveTitleControls() {
 #ifndef Q_OS_WIN
     QSKIP("Native caption hit testing is Windows-specific");
 #else
+    if (!usesWindowsQpa()) {
+        QSKIP("Requires the Windows QPA plugin");
+    }
     resetTestSettings("native-title-caption-hit-test");
     MainWindow window;
     window.resize(1000, 650);
@@ -4442,6 +4457,9 @@ void UiTests::mainWindowNativeCaptionDoubleClickChangesStateOnce() {
 #ifndef Q_OS_WIN
     QSKIP("Native caption double-click handling is Windows-specific");
 #else
+    if (!usesWindowsQpa()) {
+        QSKIP("Requires the Windows QPA plugin");
+    }
     resetTestSettings("native-caption-double-click-state");
     MainWindow window;
     window.resize(900, 600);
@@ -4514,58 +4532,59 @@ void UiTests::mainWindowTitleToolAreaDoubleClickTogglesMaximize() {
     QVERIFY(!window.isMaximized());
 
 #ifdef Q_OS_WIN
-    auto blankPosition = [](QWidget *widget, const std::function<QAction *(const QPoint &)> &actionAt) {
-        for (int x = widget->width() - 2; x >= 0; --x) {
-            const QPoint candidate(x, widget->height() / 2);
-            if (!actionAt(candidate)) {
-                return candidate;
+    if (usesWindowsQpa()) {
+        auto blankPosition = [](QWidget *widget, const std::function<QAction *(const QPoint &)> &actionAt) {
+            for (int x = widget->width() - 2; x >= 0; --x) {
+                const QPoint candidate(x, widget->height() / 2);
+                if (!actionAt(candidate)) {
+                    return candidate;
+                }
             }
-        }
-        return QPoint();
-    };
-    const QPoint menuBlank = blankPosition(menuBar, [menuBar](const QPoint &point) {
-        return menuBar->actionAt(point);
-    });
-    const QPoint toolBlank = blankPosition(toolBar, [toolBar](const QPoint &point) {
-        return toolBar->actionAt(point);
-    });
-    QVERIFY(!menuBlank.isNull());
-    QVERIFY(!toolBlank.isNull());
+            return QPoint();
+        };
+        const QPoint menuBlank = blankPosition(menuBar, [menuBar](const QPoint &point) {
+            return menuBar->actionAt(point);
+        });
+        const QPoint toolBlank = blankPosition(toolBar, [toolBar](const QPoint &point) {
+            return toolBar->actionAt(point);
+        });
+        QVERIFY(!menuBlank.isNull());
+        QVERIFY(!toolBlank.isNull());
 
-    auto nativeDoubleClick = [&window](QWidget *widget, const QPoint &position) {
-        const HWND hwnd = reinterpret_cast<HWND>(window.winId());
-        const POINT screenPosition = nativeScreenPointAtWidgetPoint(&window, widget, position);
-        const LPARAM messagePosition = MAKELPARAM(static_cast<short>(screenPosition.x),
-                                                  static_cast<short>(screenPosition.y));
-        SendMessageW(hwnd, WM_NCLBUTTONDBLCLK, HTCAPTION, messagePosition);
-    };
+        auto nativeDoubleClick = [&window](QWidget *widget, const QPoint &position) {
+            const HWND hwnd = reinterpret_cast<HWND>(window.winId());
+            const POINT screenPosition = nativeScreenPointAtWidgetPoint(&window, widget, position);
+            const LPARAM messagePosition = MAKELPARAM(static_cast<short>(screenPosition.x),
+                                                      static_cast<short>(screenPosition.y));
+            SendMessageW(hwnd, WM_NCLBUTTONDBLCLK, HTCAPTION, messagePosition);
+        };
 
-    nativeDoubleClick(menuBar, menuBlank);
-#else
+        nativeDoubleClick(menuBar, menuBlank);
+        QTRY_VERIFY(window.isMaximized());
+        nativeDoubleClick(menuBar, menuBlank);
+        QTRY_VERIFY(!window.isMaximized());
+        nativeDoubleClick(toolBar, toolBlank);
+        QTRY_VERIFY(window.isMaximized());
+        nativeDoubleClick(toolBar, toolBlank);
+        QTRY_VERIFY(!window.isMaximized());
+        return;
+    }
+#endif
+
+#ifndef Q_OS_WIN
     QTest::mouseDClick(menuBar, Qt::LeftButton, Qt::NoModifier, menuBar->rect().center());
-#endif
     QTRY_VERIFY(window.isMaximized());
-
-#ifdef Q_OS_WIN
-    nativeDoubleClick(menuBar, menuBlank);
-#else
     QTest::mouseDClick(menuBar, Qt::LeftButton, Qt::NoModifier, menuBar->rect().center());
-#endif
     QTRY_VERIFY(!window.isMaximized());
-
-#ifdef Q_OS_WIN
-    nativeDoubleClick(toolBar, toolBlank);
-#else
-    QTest::mouseDClick(toolBar, Qt::LeftButton, Qt::NoModifier, QPoint(toolBar->width() - 8, toolBar->height() / 2));
-#endif
+    QTest::mouseDClick(toolBar, Qt::LeftButton, Qt::NoModifier,
+                      QPoint(toolBar->width() - 8, toolBar->height() / 2));
     QTRY_VERIFY(window.isMaximized());
-
-#ifdef Q_OS_WIN
-    nativeDoubleClick(toolBar, toolBlank);
-#else
-    QTest::mouseDClick(toolBar, Qt::LeftButton, Qt::NoModifier, QPoint(toolBar->width() - 8, toolBar->height() / 2));
-#endif
+    QTest::mouseDClick(toolBar, Qt::LeftButton, Qt::NoModifier,
+                      QPoint(toolBar->width() - 8, toolBar->height() / 2));
     QTRY_VERIFY(!window.isMaximized());
+#else
+    QSKIP("Windows title handling requires the Windows QPA plugin");
+#endif
 }
 
 void UiTests::mainWindowRecoversWindowPositionWhenSavedScreenIsUnavailable() {
