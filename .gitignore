@@ -51,6 +51,7 @@ venv/
 
 # Claude Code
 .claude/
+.worktrees/
 
 # Debug/temp scripts
 debug_run.bat
