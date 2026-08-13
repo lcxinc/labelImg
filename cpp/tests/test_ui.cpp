@@ -6,9 +6,15 @@
 #include "core/AnnotationIO.h"
 #include "core/LabelMeConfig.h"
 #include "core/ResourcePaths.h"
+#include "core/WindowChrome.h"
 #include "ui/Canvas.h"
 #include "ui/MiniMapOverlay.h"
 #include "ui/MainWindow.h"
+
+#ifdef Q_OS_WIN
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 class UiTests : public QObject {
     Q_OBJECT
@@ -150,6 +156,8 @@ private slots:
     void mainWindowDeletesCurrentAnnotationFileAndClearsShapes();
     void mainWindowCloseFileDisablesCanvasAndClearsActiveState();
     void mainWindowUsesFramelessChrome();
+    void mainWindowNativeStyleSupportsResizeAndSnap();
+    void mainWindowNativeHitTestSupportsEveryResizeEdge();
     void mainWindowUsesGeneratedCppIcon();
     void mainWindowEmbedsToolbarIntoFramelessTitleBar();
     void mainWindowTitleToolAreaDoubleClickTogglesMaximize();
@@ -4255,6 +4263,69 @@ void UiTests::mainWindowUsesFramelessChrome() {
     QVERIFY(window.findChild<QToolButton *>("maximizeButton"));
     QVERIFY(window.findChild<QToolButton *>("closeButton"));
     QVERIFY(window.menuWidget());
+}
+
+#ifdef Q_OS_WIN
+LRESULT nativeHitTest(HWND hwnd, int screenX, int screenY) {
+    const LPARAM point = MAKELPARAM(static_cast<short>(screenX), static_cast<short>(screenY));
+    return SendMessageW(hwnd, WM_NCHITTEST, 0, point);
+}
+#endif
+
+void UiTests::mainWindowNativeStyleSupportsResizeAndSnap() {
+    resetTestSettings("native-resize-snap-style");
+    MainWindow window;
+    window.resize(900, 600);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+    QVERIFY(window.maximumWidth() > window.width());
+    QVERIFY(window.maximumHeight() > window.height());
+
+#ifdef Q_OS_WIN
+    const HWND hwnd = reinterpret_cast<HWND>(window.winId());
+    QVERIFY(hwnd);
+    const quintptr style = static_cast<quintptr>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+    QVERIFY2(hasWindowsWindowChromeStyle(style),
+             qPrintable(QStringLiteral("native style 0x%1 lacks resize/snap bits")
+                            .arg(style, 0, 16)));
+#endif
+}
+
+void UiTests::mainWindowNativeHitTestSupportsEveryResizeEdge() {
+#ifndef Q_OS_WIN
+    QSKIP("Native resize hit testing is Windows-specific");
+#else
+    resetTestSettings("native-resize-hit-test");
+    MainWindow window;
+    window.resize(900, 600);
+    window.move(120, 120);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QVERIFY(!window.isMaximized());
+
+    const HWND hwnd = reinterpret_cast<HWND>(window.winId());
+    QVERIFY(hwnd);
+    RECT nativeRect{};
+    QVERIFY(GetWindowRect(hwnd, &nativeRect));
+
+    const int left = nativeRect.left + 1;
+    const int right = nativeRect.right - 2;
+    const int top = nativeRect.top + 1;
+    const int bottom = nativeRect.bottom - 2;
+    const int centerX = nativeRect.left + (nativeRect.right - nativeRect.left) / 2;
+    const int centerY = nativeRect.top + (nativeRect.bottom - nativeRect.top) / 2;
+
+    QCOMPARE(nativeHitTest(hwnd, left, top), static_cast<LRESULT>(HTTOPLEFT));
+    QCOMPARE(nativeHitTest(hwnd, centerX, top), static_cast<LRESULT>(HTTOP));
+    QCOMPARE(nativeHitTest(hwnd, right, top), static_cast<LRESULT>(HTTOPRIGHT));
+    QCOMPARE(nativeHitTest(hwnd, left, centerY), static_cast<LRESULT>(HTLEFT));
+    QCOMPARE(nativeHitTest(hwnd, right, centerY), static_cast<LRESULT>(HTRIGHT));
+    QCOMPARE(nativeHitTest(hwnd, left, bottom), static_cast<LRESULT>(HTBOTTOMLEFT));
+    QCOMPARE(nativeHitTest(hwnd, centerX, bottom), static_cast<LRESULT>(HTBOTTOM));
+    QCOMPARE(nativeHitTest(hwnd, right, bottom), static_cast<LRESULT>(HTBOTTOMRIGHT));
+    QCOMPARE(nativeHitTest(hwnd, centerX, centerY), static_cast<LRESULT>(HTCLIENT));
+#endif
 }
 
 void UiTests::mainWindowUsesGeneratedCppIcon() {
