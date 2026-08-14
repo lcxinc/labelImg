@@ -91,3 +91,5 @@ target_link_libraries(labelImgCppUiTests PRIVATE labelImgCppCore Qt6::Widgets Qt
 add_test(NAME labelImgCppUiTests COMMAND labelImgCppUiTests)
 set_tests_properties(labelImgCppTests labelImgCppUiTests
     PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/..")
+set_tests_properties(labelImgCppUiTests
+    PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
