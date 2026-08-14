@@ -31,6 +31,8 @@ public:
     QVector<ShortcutCommand> commands() const;
 
     bool setShortcuts(const QString &commandId, const QList<QKeySequence> &shortcuts);
+    bool setDefaults(const QString &commandId, const QList<QKeySequence> &defaults,
+                     bool resetCurrent = true);
     void reset(const QString &commandId);
     void resetAll();
 

@@ -9,6 +9,7 @@
 #include "ui/Canvas.h"
 #include "ui/MiniMapOverlay.h"
 #include "ui/MainWindow.h"
+#include "ui/ShortcutCaptureEdit.h"
 
 class UiTests : public QObject {
     Q_OBJECT
@@ -200,6 +201,11 @@ private slots:
     void mainWindowOnlyActiveCreateActionIsDisabled();
     void mainWindowPShortcutCreatesPolygonShape();
     void mainWindowProvidesLabelMeCreateShortcuts();
+    void mainWindowAppliesPersistedShortcutOverrides();
+    void mainWindowBareShortcutsDoNotStealTextInput();
+    void shortcutCaptureEditAcceptsSingleKeysAndCanClear();
+    void mainWindowSettingsUsesCategoryNavigationAndShortcutPage();
+    void mainWindowSettingsRejectsShortcutConflictsAndAppliesValidBinding();
     void mainWindowProvidesSynchronizedZoomWidget();
     void mainWindowShortcutZoomKeepsViewportCenter();
     void mainWindowShortcutZoomUsesLabelMeMultiplicativeSteps();
@@ -4605,11 +4611,12 @@ void UiTests::mainWindowSettingsDialogUsesActiveLanguage() {
             return;
         }
         inspected = true;
-        auto *tabs = dialog->findChild<QTabWidget *>();
+        auto *categories = dialog->findChild<QListWidget *>(QStringLiteral("settingsCategoryList"));
         auto *displayLabelPopup = dialog->findChild<QCheckBox *>(QStringLiteral("settingsDisplayLabelPopup"));
-        correct = tabs && displayLabelPopup &&
-                  tabs->tabText(0) == QStringLiteral("General") &&
-                  tabs->tabText(1) == QStringLiteral("View & Annotation") &&
+        correct = categories && displayLabelPopup && categories->count() == 3 &&
+                  categories->item(0)->text() == QStringLiteral("General") &&
+                  categories->item(1)->text() == QStringLiteral("View & Annotation") &&
+                  categories->item(2)->text() == QStringLiteral("Shortcuts") &&
                   displayLabelPopup->text() == QStringLiteral("Show label editor when creating annotation");
         dialog->reject();
     });
@@ -6106,6 +6113,133 @@ void UiTests::mainWindowProvidesLabelMeCreateShortcuts() {
     QVERIFY(saveDirAction->shortcuts().contains(QKeySequence(QStringLiteral("Ctrl+Shift+R"))));
     QVERIFY(!saveDirAction->shortcuts().contains(QKeySequence(QStringLiteral("Ctrl+R"))));
     QCOMPARE(undoLastPointAction->shortcut(), QKeySequence::Undo);
+}
+
+void UiTests::mainWindowAppliesPersistedShortcutOverrides() {
+    resetTestSettings("persisted-shortcut-overrides");
+    QSettings settings;
+    settings.setValue(QStringLiteral("shortcuts/view_mode"), QStringList{QStringLiteral("B")});
+    settings.setValue(QStringLiteral("shortcuts/undo"), QStringList{QStringLiteral("Ctrl+Alt+Z")});
+
+    MainWindow window;
+    auto *viewAction = window.findChild<QAction *>(QStringLiteral("viewModeAction"));
+    auto *undoLastPointAction = window.findChild<QAction *>(QStringLiteral("undoLastPointAction"));
+    auto *viewShortcut = window.findChild<QToolButton *>(QStringLiteral("footerViewShortcut"));
+    QVERIFY(viewAction);
+    QVERIFY(undoLastPointAction);
+    QVERIFY(viewShortcut);
+    QCOMPARE(viewAction->property("shortcutCommandId").toString(), QStringLiteral("view_mode"));
+    QCOMPARE(viewAction->shortcuts(), QList<QKeySequence>{QKeySequence(QStringLiteral("B"))});
+    QCOMPARE(undoLastPointAction->property("shortcutCommandId").toString(), QStringLiteral("undo"));
+    QCOMPARE(undoLastPointAction->shortcuts(),
+             QList<QKeySequence>{QKeySequence(QStringLiteral("Ctrl+Alt+Z"))});
+    QCOMPARE(viewShortcut->text(), QStringLiteral("B"));
+}
+
+void UiTests::mainWindowBareShortcutsDoNotStealTextInput() {
+    resetTestSettings("bare-shortcuts-text-input");
+    MainWindow window;
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+    auto *createAction = window.findChild<QAction *>(QStringLiteral("createModeAction"));
+    QVERIFY(createAction);
+    QVERIFY(!createAction->isChecked());
+
+    QLineEdit edit(&window);
+    edit.show();
+    edit.setFocus();
+    QTRY_VERIFY(edit.hasFocus());
+    QTest::keyClick(&edit, Qt::Key_W);
+    QCOMPARE(edit.text(), QStringLiteral("w"));
+    QVERIFY(!createAction->isChecked());
+}
+
+void UiTests::shortcutCaptureEditAcceptsSingleKeysAndCanClear() {
+    ShortcutCaptureEdit edit;
+    edit.setSequence(QKeySequence(QStringLiteral("W")));
+    QCOMPARE(edit.sequence(), QKeySequence(QStringLiteral("W")));
+
+    edit.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&edit));
+    edit.setFocus();
+    QTest::keyClick(&edit, Qt::Key_B, Qt::ControlModifier | Qt::ShiftModifier);
+    QCOMPARE(edit.sequence(), QKeySequence(QStringLiteral("Ctrl+Shift+B")));
+
+    QTest::keyClick(&edit, Qt::Key_Escape);
+    QCOMPARE(edit.sequence(), QKeySequence(QStringLiteral("Ctrl+Shift+B")));
+    QTest::keyClick(&edit, Qt::Key_Backspace);
+    QVERIFY(edit.sequence().isEmpty());
+}
+
+void UiTests::mainWindowSettingsUsesCategoryNavigationAndShortcutPage() {
+    resetTestSettings("settings-category-navigation");
+    MainWindow window;
+    auto *settingsAction = window.findChild<QAction *>(QStringLiteral("settingsAction"));
+    QVERIFY(settingsAction);
+
+    QTimer::singleShot(60, []() {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        auto *categories = dialog->findChild<QListWidget *>(QStringLiteral("settingsCategoryList"));
+        auto *pages = dialog->findChild<QStackedWidget *>(QStringLiteral("settingsPages"));
+        auto *table = dialog->findChild<QTableWidget *>(QStringLiteral("shortcutTable"));
+        auto *search = dialog->findChild<QLineEdit *>(QStringLiteral("shortcutSearch"));
+        auto *restore = dialog->findChild<QPushButton *>(QStringLiteral("shortcutRestoreAll"));
+        QVERIFY(categories);
+        QVERIFY(pages);
+        QVERIFY(table);
+        QVERIFY(search);
+        QVERIFY(restore);
+        QCOMPARE(categories->count(), 3);
+        QVERIFY(table->rowCount() >= 30);
+        categories->setCurrentRow(2);
+        QCOMPARE(pages->currentIndex(), 2);
+        dialog->reject();
+    });
+    settingsAction->trigger();
+}
+
+void UiTests::mainWindowSettingsRejectsShortcutConflictsAndAppliesValidBinding() {
+    resetTestSettings("settings-shortcut-conflict");
+    MainWindow window;
+    auto *settingsAction = window.findChild<QAction *>(QStringLiteral("settingsAction"));
+    auto *openAction = actionByShortcut(&window, QKeySequence::Open);
+    QVERIFY(settingsAction);
+    QVERIFY(openAction);
+
+    QTimer::singleShot(60, []() {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        auto *table = dialog->findChild<QTableWidget *>(QStringLiteral("shortcutTable"));
+        auto *buttons = dialog->findChild<QDialogButtonBox *>(QStringLiteral("settingsButtons"));
+        QVERIFY(table);
+        QVERIFY(buttons);
+        QPushButton *ok = buttons->button(QDialogButtonBox::Ok);
+        QVERIFY(ok);
+
+        ShortcutCaptureEdit *openEditor = nullptr;
+        for (int row = 0; row < table->rowCount(); ++row) {
+            if (table->item(row, 0)->data(Qt::UserRole).toString() == QStringLiteral("open")) {
+                openEditor = qobject_cast<ShortcutCaptureEdit *>(table->cellWidget(row, 1));
+                break;
+            }
+        }
+        QVERIFY(openEditor);
+        openEditor->setFocus();
+        QTest::keyClick(openEditor, Qt::Key_W);
+        QVERIFY(!ok->isEnabled());
+        QVERIFY(openEditor->property("shortcutConflict").toBool());
+
+        QTest::keyClick(openEditor, Qt::Key_B);
+        QVERIFY(ok->isEnabled());
+        ok->click();
+    });
+    settingsAction->trigger();
+
+    QCOMPARE(openAction->shortcuts(), QList<QKeySequence>{QKeySequence(QStringLiteral("B"))});
+    QCOMPARE(QSettings().value(QStringLiteral("shortcuts/open")).toStringList(),
+             QStringList{QStringLiteral("B")});
 }
 
 void UiTests::mainWindowProvidesSynchronizedZoomWidget() {

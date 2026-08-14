@@ -60,6 +60,8 @@ add_executable(labelImgCpp
     src/ui/FramelessTitleBar.h
     src/ui/MiniMapOverlay.cpp
     src/ui/MiniMapOverlay.h
+    src/ui/ShortcutCaptureEdit.cpp
+    src/ui/ShortcutCaptureEdit.h
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
     ${APP_ICON_RC}
@@ -80,6 +82,8 @@ add_executable(labelImgCppUiTests
     src/ui/FramelessTitleBar.h
     src/ui/MiniMapOverlay.cpp
     src/ui/MiniMapOverlay.h
+    src/ui/ShortcutCaptureEdit.cpp
+    src/ui/ShortcutCaptureEdit.h
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
 )

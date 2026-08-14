@@ -62,6 +62,25 @@ bool ShortcutRegistry::setShortcuts(const QString &commandId, const QList<QKeySe
     return true;
 }
 
+bool ShortcutRegistry::setDefaults(const QString &commandId, const QList<QKeySequence> &defaults,
+                                   bool resetCurrent) {
+    const int index = indexOf(commandId);
+    if (index < 0) {
+        return false;
+    }
+
+    bool valid = false;
+    const QList<QKeySequence> values = normalized(defaults, &valid);
+    if (!valid) {
+        return false;
+    }
+    m_commands[index].defaults = values;
+    if (resetCurrent) {
+        m_commands[index].shortcuts = values;
+    }
+    return true;
+}
+
 void ShortcutRegistry::reset(const QString &commandId) {
     const int index = indexOf(commandId);
     if (index >= 0) {

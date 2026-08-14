@@ -101,6 +101,7 @@ private slots:
     void shortcutRegistryNormalizesAndLimitsBindings();
     void shortcutRegistryRejectsConflicts();
     void shortcutRegistryPersistsOnlyOverrides();
+    void shortcutRegistryCanReplaceEffectiveDefaults();
     void imageIoNormalizesHighBitGrayscale();
     void imageIoReadsBoundedPreview();
     void imageIoPreviewPreservesExifDisplaySize();
@@ -2940,6 +2941,26 @@ void CoreTests::shortcutRegistryPersistsOnlyOverrides() {
         QVERIFY(!settings.contains(QStringLiteral("shortcuts/delete_shape")));
         QVERIFY(!settings.contains(QStringLiteral("shortcuts/unused")));
     }
+}
+
+void CoreTests::shortcutRegistryCanReplaceEffectiveDefaults() {
+    ShortcutRegistry registry;
+    QVERIFY(registry.addCommand({QStringLiteral("open"), QStringLiteral("file"),
+                                 {QKeySequence(QStringLiteral("Ctrl+O"))}}));
+
+    QVERIFY(registry.setDefaults(QStringLiteral("open"),
+                                 {QKeySequence(QStringLiteral("Ctrl+Shift+O"))}));
+    QCOMPARE(registry.command(QStringLiteral("open")).defaults,
+             QList<QKeySequence>{QKeySequence(QStringLiteral("Ctrl+Shift+O"))});
+    QCOMPARE(registry.command(QStringLiteral("open")).shortcuts,
+             QList<QKeySequence>{QKeySequence(QStringLiteral("Ctrl+Shift+O"))});
+
+    QVERIFY(registry.setShortcuts(QStringLiteral("open"), {QKeySequence(QStringLiteral("O"))}));
+    QVERIFY(registry.setDefaults(QStringLiteral("open"), {QKeySequence(QStringLiteral("Alt+O"))}, false));
+    QCOMPARE(registry.command(QStringLiteral("open")).defaults,
+             QList<QKeySequence>{QKeySequence(QStringLiteral("Alt+O"))});
+    QCOMPARE(registry.command(QStringLiteral("open")).shortcuts,
+             QList<QKeySequence>{QKeySequence(QStringLiteral("O"))});
 }
 
 void CoreTests::imageIoNormalizesHighBitGrayscale() {
