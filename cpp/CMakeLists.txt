@@ -32,6 +32,8 @@ set(CORE_SOURCES
     src/core/Shape.h
     src/core/StringBundle.cpp
     src/core/StringBundle.h
+    src/core/ShortcutRegistry.cpp
+    src/core/ShortcutRegistry.h
 )
 
 add_library(labelImgCppCore STATIC ${CORE_SOURCES})

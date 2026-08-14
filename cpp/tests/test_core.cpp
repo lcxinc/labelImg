@@ -20,6 +20,7 @@
 #include "core/PerformanceMonitor.h"
 #include "core/ResourcePaths.h"
 #include "core/StringBundle.h"
+#include "core/ShortcutRegistry.h"
 
 class CoreTests : public QObject {
     Q_OBJECT
@@ -97,6 +98,9 @@ private slots:
     void shapeOverlapSkipsUnknownPluginTypesLikeLabelMe();
     void polygonShapeSupportsPointInsertionAndRemovalRules();
     void performanceMonitorReturnsCpuAndMemoryText();
+    void shortcutRegistryNormalizesAndLimitsBindings();
+    void shortcutRegistryRejectsConflicts();
+    void shortcutRegistryPersistsOnlyOverrides();
     void imageIoNormalizesHighBitGrayscale();
     void imageIoReadsBoundedPreview();
     void imageIoPreviewPreservesExifDisplaySize();
@@ -2835,6 +2839,107 @@ void CoreTests::performanceMonitorReturnsCpuAndMemoryText() {
     QVERIFY(text.contains("CPU"));
     QVERIFY(text.contains("MEM"));
     QVERIFY(!text.isEmpty());
+}
+
+void CoreTests::shortcutRegistryNormalizesAndLimitsBindings() {
+    ShortcutRegistry registry;
+    QVERIFY(registry.addCommand({QStringLiteral("create_rectangle"),
+                                 QStringLiteral("annotation"),
+                                 {QKeySequence(QStringLiteral("W")),
+                                  QKeySequence(QStringLiteral("Ctrl+R"))}}));
+
+    QCOMPARE(registry.command(QStringLiteral("create_rectangle")).shortcuts,
+             QList<QKeySequence>({QKeySequence(QStringLiteral("W")),
+                                  QKeySequence(QStringLiteral("Ctrl+R"))}));
+    QVERIFY(registry.setShortcuts(QStringLiteral("create_rectangle"),
+                                  {QKeySequence(QStringLiteral("v")),
+                                   QKeySequence(QStringLiteral("Ctrl+Shift+R"))}));
+    QCOMPARE(registry.command(QStringLiteral("create_rectangle")).shortcuts,
+             QList<QKeySequence>({QKeySequence(QStringLiteral("V")),
+                                  QKeySequence(QStringLiteral("Ctrl+Shift+R"))}));
+    QVERIFY(!registry.setShortcuts(QStringLiteral("create_rectangle"),
+                                   {QKeySequence(QStringLiteral("A")),
+                                    QKeySequence(QStringLiteral("B")),
+                                    QKeySequence(QStringLiteral("C"))}));
+    QVERIFY(!registry.setShortcuts(QStringLiteral("create_rectangle"),
+                                   {QKeySequence(QStringLiteral("Ctrl+K, Ctrl+C"))}));
+
+    registry.reset(QStringLiteral("create_rectangle"));
+    QCOMPARE(registry.command(QStringLiteral("create_rectangle")).shortcuts,
+             registry.command(QStringLiteral("create_rectangle")).defaults);
+}
+
+void CoreTests::shortcutRegistryRejectsConflicts() {
+    ShortcutRegistry registry;
+    QVERIFY(registry.addCommand({QStringLiteral("view"), QStringLiteral("mode"),
+                                 {QKeySequence(QStringLiteral("V"))}}));
+    QVERIFY(registry.addCommand({QStringLiteral("verify"), QStringLiteral("annotation"),
+                                 {QKeySequence(QStringLiteral("Space"))}}));
+    QVERIFY(registry.setShortcuts(QStringLiteral("verify"),
+                                  {QKeySequence(QStringLiteral("V")),
+                                   QKeySequence(QStringLiteral("V"))}));
+
+    const QVector<ShortcutConflict> conflicts = registry.conflicts();
+    QCOMPARE(conflicts.size(), 1);
+    QCOMPARE(conflicts.first().sequence, QKeySequence(QStringLiteral("V")));
+    QCOMPARE(conflicts.first().locations.size(), 3);
+    QCOMPARE(conflicts.first().locations.at(0).commandId, QStringLiteral("view"));
+    QCOMPARE(conflicts.first().locations.at(1).commandId, QStringLiteral("verify"));
+    QCOMPARE(conflicts.first().locations.at(1).slot, 0);
+    QCOMPARE(conflicts.first().locations.at(2).slot, 1);
+    QVERIFY(registry.hasConflicts());
+
+    QVERIFY(registry.setShortcuts(QStringLiteral("verify"), {QKeySequence(QStringLiteral("Space"))}));
+    QVERIFY(!registry.hasConflicts());
+}
+
+void CoreTests::shortcutRegistryPersistsOnlyOverrides() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString settingsPath = dir.filePath(QStringLiteral("shortcuts.ini"));
+
+    ShortcutRegistry registry;
+    QVERIFY(registry.addCommand({QStringLiteral("delete_shape"), QStringLiteral("edit"),
+                                 {QKeySequence(QStringLiteral("Delete")),
+                                  QKeySequence(QStringLiteral("X"))}}));
+    QVERIFY(registry.addCommand({QStringLiteral("unused"), QStringLiteral("edit"),
+                                 {QKeySequence(QStringLiteral("U"))}}));
+    QVERIFY(registry.setShortcuts(QStringLiteral("delete_shape"),
+                                  {QKeySequence(QStringLiteral("Backspace")),
+                                   QKeySequence(QStringLiteral("D"))}));
+    QVERIFY(registry.setShortcuts(QStringLiteral("unused"), {}));
+
+    {
+        QSettings settings(settingsPath, QSettings::IniFormat);
+        registry.saveOverrides(settings);
+        QVERIFY(settings.contains(QStringLiteral("shortcuts/delete_shape")));
+        QVERIFY(settings.contains(QStringLiteral("shortcuts/unused")));
+        QCOMPARE(settings.value(QStringLiteral("shortcuts/delete_shape")).toStringList(),
+                 QStringList({QStringLiteral("Backspace"), QStringLiteral("D")}));
+    }
+
+    ShortcutRegistry restored;
+    QVERIFY(restored.addCommand({QStringLiteral("delete_shape"), QStringLiteral("edit"),
+                                 {QKeySequence(QStringLiteral("Delete")),
+                                  QKeySequence(QStringLiteral("X"))}}));
+    QVERIFY(restored.addCommand({QStringLiteral("unused"), QStringLiteral("edit"),
+                                 {QKeySequence(QStringLiteral("U"))}}));
+    {
+        QSettings settings(settingsPath, QSettings::IniFormat);
+        restored.loadOverrides(settings);
+    }
+    QCOMPARE(restored.command(QStringLiteral("delete_shape")).shortcuts,
+             QList<QKeySequence>({QKeySequence(QStringLiteral("Backspace")),
+                                  QKeySequence(QStringLiteral("D"))}));
+    QVERIFY(restored.command(QStringLiteral("unused")).shortcuts.isEmpty());
+
+    restored.resetAll();
+    {
+        QSettings settings(settingsPath, QSettings::IniFormat);
+        restored.saveOverrides(settings);
+        QVERIFY(!settings.contains(QStringLiteral("shortcuts/delete_shape")));
+        QVERIFY(!settings.contains(QStringLiteral("shortcuts/unused")));
+    }
 }
 
 void CoreTests::imageIoNormalizesHighBitGrayscale() {
