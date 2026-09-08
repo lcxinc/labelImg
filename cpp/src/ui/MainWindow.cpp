@@ -3,6 +3,7 @@
 #include "core/ResourcePaths.h"
 #include "core/AiAssistBridge.h"
 #include "core/ImageIO.h"
+#include "ui/ShortcutCaptureEdit.h"
 
 #include <QAbstractButton>
 #include <QApplication>
@@ -27,6 +28,7 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QHash>
+#include <QHeaderView>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QImageReader>
@@ -57,7 +59,10 @@
 #include <QStringListModel>
 #include <QStandardPaths>
 #include <QStatusBar>
+#include <QStackedWidget>
+#include <QStyle>
 #include <QTabWidget>
+#include <QTableWidget>
 #include <QTimer>
 #include <QThread>
 #include <QToolButton>
@@ -1189,60 +1194,47 @@ void MainWindow::applyLabelMeConfig(const QVariantMap &values, const QStringList
     if (values.contains(QStringLiteral("fit_to_content.row"))) {
         m_labelMeFitToContentRow = values.value(QStringLiteral("fit_to_content.row")).toBool();
     }
-    const QHash<QString, QAction *> shortcutActions = {
-        {QStringLiteral("close"), m_closeAction},
-        {QStringLiteral("quit"), m_quitAction},
-        {QStringLiteral("open"), m_openAction},
-        {QStringLiteral("open_dir"), m_openDirAction},
-        {QStringLiteral("save"), m_saveAction},
-        {QStringLiteral("save_as"), m_saveAsAction},
-        {QStringLiteral("save_to"), m_changeSaveDirAction},
-        {QStringLiteral("delete_file"), m_deleteAnnotationAction},
-        {QStringLiteral("open_next"), m_nextAction},
-        {QStringLiteral("open_prev"), m_prevAction},
-        {QStringLiteral("zoom_in"), m_zoomInAction},
-        {QStringLiteral("zoom_out"), m_zoomOutAction},
-        {QStringLiteral("zoom_to_original"), m_zoomOriginalAction},
-        {QStringLiteral("fit_window"), m_fitWindowAction},
-        {QStringLiteral("fit_width"), m_fitWidthAction},
-        {QStringLiteral("create_polygon"), m_createPolygonModeAction},
-        {QStringLiteral("create_rectangle"), m_createModeAction},
-        {QStringLiteral("create_oriented_rectangle"), m_createOrientedRectangleModeAction},
-        {QStringLiteral("create_circle"), m_createCircleModeAction},
-        {QStringLiteral("create_line"), m_createLineModeAction},
-        {QStringLiteral("create_point"), m_createPointModeAction},
-        {QStringLiteral("create_linestrip"), m_createLinestripModeAction},
-        {QStringLiteral("create_points"), m_createPointsModeAction},
-        {QStringLiteral("create_mask"), m_createMaskModeAction},
-        {QStringLiteral("create_ai_points"), m_createAiPointsModeAction},
-        {QStringLiteral("create_ai_box"), m_createAiBoxModeAction},
-        {QStringLiteral("edit_shape"), m_editModeAction},
-        {QStringLiteral("delete_shape"), m_deleteAction},
-        {QStringLiteral("duplicate_shape"), m_copyAction},
-        {QStringLiteral("copy_shape"), m_copyShapesAction},
-        {QStringLiteral("paste_shape"), m_pasteShapesAction},
-        {QStringLiteral("undo"), m_undoAction},
-        {QStringLiteral("undo_last_point"), m_undoLastPointAction},
-        {QStringLiteral("edit_label"), m_editLabelAction},
-        {QStringLiteral("toggle_keep_prev_mode"), m_keepPreviousAction},
-        {QStringLiteral("remove_selected_point"), m_removeSelectedPointAction},
-        {QStringLiteral("show_all_shapes"), m_showAllAction},
-        {QStringLiteral("hide_all_shapes"), m_hideAllAction},
-        {QStringLiteral("toggle_all_shapes"), m_toggleAllAction}};
-    for (auto it = shortcutActions.cbegin(); it != shortcutActions.cend(); ++it) {
-        const QString key = QStringLiteral("shortcuts.") + it.key();
-        if (!values.contains(key) || !it.value()) {
+    const QStringList configuredShortcutIds = {
+        QStringLiteral("close"), QStringLiteral("quit"), QStringLiteral("open"), QStringLiteral("open_dir"),
+        QStringLiteral("save"), QStringLiteral("save_as"), QStringLiteral("save_to"), QStringLiteral("delete_file"),
+        QStringLiteral("open_next"), QStringLiteral("open_prev"), QStringLiteral("zoom_in"), QStringLiteral("zoom_out"),
+        QStringLiteral("zoom_to_original"), QStringLiteral("fit_window"), QStringLiteral("fit_width"),
+        QStringLiteral("create_polygon"), QStringLiteral("create_rectangle"),
+        QStringLiteral("create_oriented_rectangle"), QStringLiteral("create_circle"), QStringLiteral("create_line"),
+        QStringLiteral("create_point"), QStringLiteral("create_linestrip"), QStringLiteral("create_points"),
+        QStringLiteral("create_mask"), QStringLiteral("create_ai_points"), QStringLiteral("create_ai_box"),
+        QStringLiteral("edit_shape"), QStringLiteral("delete_shape"), QStringLiteral("duplicate_shape"),
+        QStringLiteral("copy_shape"), QStringLiteral("paste_shape"), QStringLiteral("undo"),
+        QStringLiteral("edit_label"), QStringLiteral("toggle_keep_prev_mode"),
+        QStringLiteral("remove_selected_point"), QStringLiteral("show_all_shapes"),
+        QStringLiteral("hide_all_shapes"), QStringLiteral("toggle_all_shapes")};
+    for (const QString &commandId : configuredShortcutIds) {
+        const QString key = QStringLiteral("shortcuts.") + commandId;
+        if (!values.contains(key) || !m_shortcutRegistry.contains(commandId)) {
             continue;
         }
         QList<QKeySequence> shortcuts;
         for (const QString &shortcut : LabelMeConfig::stringList(values.value(key))) {
             const QKeySequence sequence(shortcut, QKeySequence::PortableText);
-            if (!sequence.isEmpty()) {
+            if (!sequence.isEmpty() && shortcuts.size() < 2) {
                 shortcuts.append(sequence);
             }
         }
-        it.value()->setShortcuts(shortcuts);
+        m_shortcutRegistry.setDefaults(commandId, shortcuts);
     }
+    if (!values.contains(QStringLiteral("shortcuts.undo")) &&
+        values.contains(QStringLiteral("shortcuts.undo_last_point"))) {
+        QList<QKeySequence> shortcuts;
+        for (const QString &shortcut : LabelMeConfig::stringList(values.value(QStringLiteral("shortcuts.undo_last_point")))) {
+            const QKeySequence sequence(shortcut, QKeySequence::PortableText);
+            if (!sequence.isEmpty() && shortcuts.size() < 2) {
+                shortcuts.append(sequence);
+            }
+        }
+        m_shortcutRegistry.setDefaults(QStringLiteral("undo"), shortcuts);
+    }
+    m_shortcutRegistry.loadOverrides(m_settings);
+    applyShortcutRegistry();
     if (values.contains(QStringLiteral("epsilon"))) {
         m_canvas->setEpsilon(values.value(QStringLiteral("epsilon")).toDouble());
     }
@@ -1797,6 +1789,14 @@ void MainWindow::createActions() {
     m_nextShapeAction = new QAction(this);
     m_nextShapeAction->setObjectName(QStringLiteral("nextShapeAction"));
     m_nextShapeAction->setShortcut(QKeySequence(QStringLiteral("E")));
+    m_prevLabelAction = new QAction(this);
+    m_prevLabelAction->setObjectName(QStringLiteral("prevLabelAction"));
+    m_prevLabelAction->setShortcut(QKeySequence(QStringLiteral("Z")));
+    m_nextLabelAction = new QAction(this);
+    m_nextLabelAction->setObjectName(QStringLiteral("nextLabelAction"));
+    m_nextLabelAction->setShortcut(QKeySequence(QStringLiteral("C")));
+    addAction(m_prevLabelAction);
+    addAction(m_nextLabelAction);
     m_deleteAction = new QAction(this);
     m_deleteAction->setShortcuts({QKeySequence(Qt::Key_Delete), QKeySequence(QStringLiteral("X"))});
     m_deleteAllShapesAction = new QAction(this);
@@ -2011,6 +2011,156 @@ void MainWindow::createActions() {
     m_canvas->setFillDrawing(m_fillDrawingAction->isChecked());
     m_canvas->setSamplingMode(m_samplingModeAction->isChecked() ? Canvas::SamplingMode::Smooth : Canvas::SamplingMode::FastNearest);
     assignActionIcons();
+    initializeShortcutRegistry();
+}
+
+void MainWindow::registerShortcutCommand(const QString &commandId, const QString &category,
+                                         const QList<QAction *> &actions) {
+    if (actions.isEmpty() || !actions.first()) {
+        return;
+    }
+    if (!m_shortcutRegistry.addCommand({commandId, category, actions.first()->shortcuts()})) {
+        return;
+    }
+    m_shortcutActions.insert(commandId, actions);
+    for (QAction *action : actions) {
+        if (action) {
+            action->setProperty("shortcutCommandId", commandId);
+        }
+    }
+}
+
+void MainWindow::initializeShortcutRegistry() {
+    auto add = [this](const QString &id, const QString &category, QAction *action) {
+        registerShortcutCommand(id, category, {action});
+    };
+
+    add(QStringLiteral("open"), QStringLiteral("file"), m_openAction);
+    add(QStringLiteral("open_dir"), QStringLiteral("file"), m_openDirAction);
+    add(QStringLiteral("open_annotation"), QStringLiteral("file"), m_openAnnotationAction);
+    add(QStringLiteral("open_in_viewer"), QStringLiteral("file"), m_openWithImageViewerAction);
+    add(QStringLiteral("reveal_in_folder"), QStringLiteral("file"), m_openFileLocationAction);
+    add(QStringLiteral("close"), QStringLiteral("file"), m_closeAction);
+    add(QStringLiteral("quit"), QStringLiteral("file"), m_quitAction);
+    add(QStringLiteral("reset_all"), QStringLiteral("application"), m_resetAllAction);
+    add(QStringLiteral("reset_layout"), QStringLiteral("view"), m_resetLayoutAction);
+    add(QStringLiteral("save"), QStringLiteral("file"), m_saveAction);
+    add(QStringLiteral("save_as"), QStringLiteral("file"), m_saveAsAction);
+    add(QStringLiteral("save_to"), QStringLiteral("file"), m_changeSaveDirAction);
+    add(QStringLiteral("change_format"), QStringLiteral("annotation"), m_formatAction);
+    add(QStringLiteral("open_next"), QStringLiteral("navigation"), m_nextAction);
+    add(QStringLiteral("open_prev"), QStringLiteral("navigation"), m_prevAction);
+    add(QStringLiteral("open_next_copy"), QStringLiteral("navigation"), m_nextCopyAction);
+    add(QStringLiteral("open_prev_copy"), QStringLiteral("navigation"), m_prevCopyAction);
+    add(QStringLiteral("verify"), QStringLiteral("annotation"), m_verifyAction);
+    add(QStringLiteral("delete_image"), QStringLiteral("file"), m_deleteImageAction);
+    add(QStringLiteral("delete_file"), QStringLiteral("file"), m_deleteAnnotationAction);
+    add(QStringLiteral("settings"), QStringLiteral("application"), m_settingsAction);
+
+    add(QStringLiteral("edit_label"), QStringLiteral("edit"), m_editLabelAction);
+    registerShortcutCommand(QStringLiteral("undo"), QStringLiteral("edit"),
+                            {m_undoAction, m_undoLastPointAction});
+    add(QStringLiteral("redo"), QStringLiteral("edit"), m_redoAction);
+    add(QStringLiteral("previous_shape"), QStringLiteral("navigation"), m_prevShapeAction);
+    add(QStringLiteral("next_shape"), QStringLiteral("navigation"), m_nextShapeAction);
+    add(QStringLiteral("previous_label"), QStringLiteral("navigation"), m_prevLabelAction);
+    add(QStringLiteral("next_label"), QStringLiteral("navigation"), m_nextLabelAction);
+    add(QStringLiteral("delete_shape"), QStringLiteral("edit"), m_deleteAction);
+    add(QStringLiteral("delete_all_shapes"), QStringLiteral("edit"), m_deleteAllShapesAction);
+    add(QStringLiteral("duplicate_shape"), QStringLiteral("edit"), m_copyAction);
+    add(QStringLiteral("copy_shape"), QStringLiteral("edit"), m_copyShapesAction);
+    add(QStringLiteral("paste_shape"), QStringLiteral("edit"), m_pasteShapesAction);
+    add(QStringLiteral("remove_selected_point"), QStringLiteral("edit"), m_removeSelectedPointAction);
+    add(QStringLiteral("copy_previous"), QStringLiteral("edit"), m_copyPreviousAction);
+
+    add(QStringLiteral("create_rectangle"), QStringLiteral("mode"), m_createModeAction);
+    add(QStringLiteral("create_polygon"), QStringLiteral("mode"), m_createPolygonModeAction);
+    add(QStringLiteral("create_point"), QStringLiteral("mode"), m_createPointModeAction);
+    add(QStringLiteral("create_points"), QStringLiteral("mode"), m_createPointsModeAction);
+    add(QStringLiteral("create_ai_points"), QStringLiteral("mode"), m_createAiPointsModeAction);
+    add(QStringLiteral("create_ai_box"), QStringLiteral("mode"), m_createAiBoxModeAction);
+    add(QStringLiteral("create_line"), QStringLiteral("mode"), m_createLineModeAction);
+    add(QStringLiteral("create_linestrip"), QStringLiteral("mode"), m_createLinestripModeAction);
+    add(QStringLiteral("create_circle"), QStringLiteral("mode"), m_createCircleModeAction);
+    add(QStringLiteral("create_oriented_rectangle"), QStringLiteral("mode"), m_createOrientedRectangleModeAction);
+    add(QStringLiteral("create_mask"), QStringLiteral("mode"), m_createMaskModeAction);
+    add(QStringLiteral("edit_mask"), QStringLiteral("mode"), m_maskEditAction);
+    add(QStringLiteral("edit_shape"), QStringLiteral("mode"), m_editModeAction);
+    add(QStringLiteral("view_mode"), QStringLiteral("mode"), m_viewModeAction);
+    add(QStringLiteral("editing_allowed"), QStringLiteral("mode"), m_editabilityAction);
+
+    add(QStringLiteral("advanced_mode"), QStringLiteral("view"), m_advancedModeAction);
+    add(QStringLiteral("show_file_dock"), QStringLiteral("view"), m_showFileDockAction);
+    add(QStringLiteral("show_label_dock"), QStringLiteral("view"), m_showLabelDockAction);
+    add(QStringLiteral("show_shape_dock"), QStringLiteral("view"), m_showShapeDockAction);
+    add(QStringLiteral("show_flag_dock"), QStringLiteral("view"), m_showFlagDockAction);
+    add(QStringLiteral("hide_all_shapes"), QStringLiteral("view"), m_hideAllAction);
+    add(QStringLiteral("show_all_shapes"), QStringLiteral("view"), m_showAllAction);
+    add(QStringLiteral("toggle_all_shapes"), QStringLiteral("view"), m_toggleAllAction);
+    add(QStringLiteral("zoom_in"), QStringLiteral("view"), m_zoomInAction);
+    add(QStringLiteral("zoom_out"), QStringLiteral("view"), m_zoomOutAction);
+    add(QStringLiteral("zoom_to_original"), QStringLiteral("view"), m_zoomOriginalAction);
+    add(QStringLiteral("fit_window"), QStringLiteral("view"), m_fitWindowAction);
+    add(QStringLiteral("fit_width"), QStringLiteral("view"), m_fitWidthAction);
+    add(QStringLiteral("brighten"), QStringLiteral("view"), m_brightenAction);
+    add(QStringLiteral("darken"), QStringLiteral("view"), m_darkenAction);
+    add(QStringLiteral("brightness_original"), QStringLiteral("view"), m_brightnessOriginalAction);
+    add(QStringLiteral("brightness_contrast"), QStringLiteral("view"), m_brightnessContrastAction);
+    add(QStringLiteral("draw_square"), QStringLiteral("annotation"), m_drawSquareAction);
+    add(QStringLiteral("fill_drawing"), QStringLiteral("view"), m_fillDrawingAction);
+    add(QStringLiteral("box_line_color"), QStringLiteral("view"), m_boxLineColorAction);
+    add(QStringLiteral("shape_line_color"), QStringLiteral("view"), m_shapeLineColorAction);
+    add(QStringLiteral("shape_fill_color"), QStringLiteral("view"), m_shapeFillColorAction);
+    add(QStringLiteral("mini_map"), QStringLiteral("view"), m_miniMapAction);
+    add(QStringLiteral("show_performance"), QStringLiteral("view"), m_showPerformanceAction);
+    add(QStringLiteral("sampling_mode"), QStringLiteral("view"), m_samplingModeAction);
+    add(QStringLiteral("thumbnail_mode"), QStringLiteral("view"), m_thumbnailModeAction);
+    add(QStringLiteral("auto_save"), QStringLiteral("annotation"), m_autoSaveAction);
+    add(QStringLiteral("toggle_keep_prev_mode"), QStringLiteral("annotation"), m_keepPreviousAction);
+    add(QStringLiteral("keep_previous_zoom"), QStringLiteral("view"), m_keepPreviousZoomAction);
+    add(QStringLiteral("keep_previous_brightness"), QStringLiteral("view"),
+        m_keepPreviousBrightnessContrastAction);
+    add(QStringLiteral("single_class"), QStringLiteral("annotation"), m_singleClassAction);
+    add(QStringLiteral("display_labels"), QStringLiteral("annotation"), m_displayLabelsAction);
+    add(QStringLiteral("embed_image_data"), QStringLiteral("annotation"), m_embedImageDataAction);
+    add(QStringLiteral("edit_label_flags"), QStringLiteral("annotation"), m_editLabelFlagsAction);
+    add(QStringLiteral("show_info"), QStringLiteral("help"), m_infoAction);
+    add(QStringLiteral("show_shortcuts"), QStringLiteral("help"), m_shortcutsAction);
+    add(QStringLiteral("open_tutorial"), QStringLiteral("help"), m_tutorialAction);
+
+    m_shortcutRegistry.loadOverrides(m_settings);
+    applyShortcutRegistry();
+}
+
+void MainWindow::applyShortcutRegistry() {
+    for (const ShortcutCommand &command : m_shortcutRegistry.commands()) {
+        const QList<QAction *> actions = m_shortcutActions.value(command.id);
+        for (QAction *action : actions) {
+            if (action) {
+                action->setShortcuts(command.shortcuts);
+            }
+        }
+    }
+    auto firstShortcutText = [](QAction *action) {
+        return action && !action->shortcuts().isEmpty()
+                   ? action->shortcuts().first().toString(QKeySequence::NativeText)
+                   : QStringLiteral("-");
+    };
+    if (m_footerViewShortcut) {
+        m_footerViewShortcut->setText(firstShortcutText(m_viewModeAction));
+    }
+    if (m_footerEditShortcut) {
+        const QString shortcut = firstShortcutText(m_editModeAction);
+        m_footerEditShortcut->setText(shortcut == QStringLiteral("-")
+                                          ? m_strings.get(QStringLiteral("footerEditMode"))
+                                          : shortcut);
+    }
+    if (m_footerCreateShortcut) {
+        m_footerCreateShortcut->setText(firstShortcutText(m_createModeAction));
+    }
+    if (m_toolBar) {
+        refreshActionToolTips();
+    }
 }
 
 void MainWindow::createMenusAndToolbars() {
@@ -2335,6 +2485,8 @@ void MainWindow::connectSignals() {
     connect(m_redoAction, &QAction::triggered, this, &MainWindow::redoShapeOperation);
     connect(m_prevShapeAction, &QAction::triggered, this, [this]() { selectAdjacentShape(-1); });
     connect(m_nextShapeAction, &QAction::triggered, this, [this]() { selectAdjacentShape(1); });
+    connect(m_prevLabelAction, &QAction::triggered, this, [this]() { selectAdjacentLabel(-1); });
+    connect(m_nextLabelAction, &QAction::triggered, this, [this]() { selectAdjacentLabel(1); });
     connect(m_deleteAction, &QAction::triggered, this, &MainWindow::deleteCurrentShape);
     connect(m_deleteAllShapesAction, &QAction::triggered, this, &MainWindow::deleteAllShapes);
     connect(m_copyAction, &QAction::triggered, this, &MainWindow::copyCurrentShape);
@@ -3673,6 +3825,8 @@ void MainWindow::refreshTexts() {
     m_redoAction->setText(m_strings.get("redo"));
     m_prevShapeAction->setText(m_strings.get("prevShape"));
     m_nextShapeAction->setText(m_strings.get("nextShape"));
+    m_prevLabelAction->setText(m_strings.get("prevLabel"));
+    m_nextLabelAction->setText(m_strings.get("nextLabel"));
     m_deleteAction->setText(m_strings.get("delBox"));
     m_deleteAllShapesAction->setText(m_strings.get("deleteAllShapes"));
     m_copyAction->setText(m_strings.get("dupBox"));
@@ -3798,15 +3952,18 @@ void MainWindow::refreshTexts() {
         }
     }
     if (m_footerViewShortcut) {
-        m_footerViewShortcut->setText(QStringLiteral("V"));
+        m_footerViewShortcut->setText(m_viewModeAction->shortcuts().value(0).toString(QKeySequence::NativeText));
         m_footerViewShortcut->setToolTip(m_strings.get(QStringLiteral("footerViewTooltip")));
     }
     if (m_footerEditShortcut) {
-        m_footerEditShortcut->setText(m_strings.get(QStringLiteral("footerEditMode")));
+        const QString editShortcut = m_editModeAction->shortcuts().value(0).toString(QKeySequence::NativeText);
+        m_footerEditShortcut->setText(editShortcut.isEmpty()
+                                          ? m_strings.get(QStringLiteral("footerEditMode"))
+                                          : editShortcut);
         m_footerEditShortcut->setToolTip(m_strings.get(QStringLiteral("footerEditTooltip")));
     }
     if (m_footerCreateShortcut) {
-        m_footerCreateShortcut->setText(QStringLiteral("W"));
+        m_footerCreateShortcut->setText(m_createModeAction->shortcuts().value(0).toString(QKeySequence::NativeText));
         m_footerCreateShortcut->setToolTip(m_strings.get(QStringLiteral("footerCreateTooltip")));
     }
     m_fileDockCloseButton->setToolTip(m_strings.get("hideFileList"));
@@ -3854,6 +4011,8 @@ void MainWindow::refreshActionToolTips() {
         m_redoAction,
         m_prevShapeAction,
         m_nextShapeAction,
+        m_prevLabelAction,
+        m_nextLabelAction,
         m_deleteAction,
         m_deleteAllShapesAction,
         m_copyAction,
@@ -4044,6 +4203,9 @@ void MainWindow::refreshActions() {
     m_redoAction->setEnabled(!m_redoStack.isEmpty());
     m_prevShapeAction->setEnabled(hasImage);
     m_nextShapeAction->setEnabled(hasImage);
+    const bool hasLabels = hasImage && m_labelList && m_labelList->count() > 0;
+    m_prevLabelAction->setEnabled(hasLabels);
+    m_nextLabelAction->setEnabled(hasLabels);
     m_nextCopyAction->setEnabled(hasImage && m_currentImageIndex + 1 < m_imageList.size());
     m_prevCopyAction->setEnabled(hasImage && m_currentImageIndex > 0);
     m_deleteImageAction->setEnabled(hasImage);
@@ -5555,8 +5717,29 @@ void MainWindow::showInfoDialog() {
 }
 
 void MainWindow::showShortcutsDialog() {
-    QMessageBox::information(this, m_strings.get("shortcut"),
-                               "A/D: previous/next image\nCtrl+Shift+A/D: previous/next image and copy shapes\nW: create box\nP: create polygon\nMode menu: create point/line/linestrip/circle/oriented rectangle/mask\nV: view mode\nEditability: Settings\nQ/E: previous/next box\nX/S/Delete: delete label\nCtrl+Z/Y: undo/redo\nCtrl+C/V: copy/paste selected shapes\nCtrl+D: duplicate selected shapes\nCtrl+Shift+V: copy previous image boxes\nZ/C: previous/next label\nAlt+Click edge: insert polygon/linestrip point\nAlt+Shift+Click point: remove polygon/linestrip point\nBackspace: remove hovered polygon/linestrip point\nSpace: verified\nCtrl+Wheel: zoom\nCtrl+Shift+Wheel: brightness");
+    QStringList lines;
+    QString lastCategory;
+    for (const ShortcutCommand &command : m_shortcutRegistry.commands()) {
+        if (command.shortcuts.isEmpty()) {
+            continue;
+        }
+        if (command.category != lastCategory) {
+            if (!lines.isEmpty()) {
+                lines.append(QString());
+            }
+            lines.append(command.category.toUpper());
+            lastCategory = command.category;
+        }
+        QAction *action = m_shortcutActions.value(command.id).value(0, nullptr);
+        QString name = action ? action->text() : command.id;
+        name.remove(QLatin1Char('&'));
+        QStringList bindings;
+        for (const QKeySequence &sequence : command.shortcuts) {
+            bindings.append(sequence.toString(QKeySequence::NativeText));
+        }
+        lines.append(QStringLiteral("%1    %2").arg(bindings.join(QStringLiteral(" / ")), name));
+    }
+    QMessageBox::information(this, m_strings.get("shortcut"), lines.join(QLatin1Char('\n')));
 }
 
 void MainWindow::openTutorial() {
@@ -5571,15 +5754,35 @@ void MainWindow::showSettingsDialog() {
     QDialog dialog(this);
     dialog.setObjectName(QStringLiteral("settingsDialog"));
     dialog.setWindowTitle(m_strings.get("settings"));
-    dialog.resize(560, 520);
+    dialog.resize(860, 600);
+    dialog.setStyleSheet(QStringLiteral(
+        "QListWidget#settingsCategoryList { border: 0; border-right: 1px solid #d8dde3; background: #f6f7f8; padding: 6px; }"
+        "QListWidget#settingsCategoryList::item { min-height: 34px; padding: 0 10px; border-radius: 5px; }"
+        "QListWidget#settingsCategoryList::item:selected { color: #0b5f47; background: #dff1e8; }"
+        "QLineEdit[shortcutConflict=\"true\"] { border: 1px solid #d14343; background: #fff1f1; color: #9f1d1d; }"));
 
-    auto *tabs = new QTabWidget(&dialog);
-    auto *generalPage = new QWidget(tabs);
+    ShortcutRegistry pendingShortcuts = m_shortcutRegistry;
+    auto *categories = new QListWidget(&dialog);
+    categories->setObjectName(QStringLiteral("settingsCategoryList"));
+    categories->setFixedWidth(150);
+    categories->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto *pages = new QStackedWidget(&dialog);
+    pages->setObjectName(QStringLiteral("settingsPages"));
+    auto *generalPage = new QWidget(pages);
     auto *generalForm = new QFormLayout(generalPage);
-    auto *viewPage = new QWidget(tabs);
+    generalForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    auto *viewPage = new QWidget(pages);
     auto *viewForm = new QFormLayout(viewPage);
-    tabs->addTab(generalPage, m_strings.get(QStringLiteral("settingsGeneral")));
-    tabs->addTab(viewPage, m_strings.get(QStringLiteral("settingsViewAnnotation")));
+    viewForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    auto *shortcutPage = new QWidget(pages);
+    pages->addWidget(generalPage);
+    pages->addWidget(viewPage);
+    pages->addWidget(shortcutPage);
+    categories->addItem(m_strings.get(QStringLiteral("settingsGeneral")));
+    categories->addItem(m_strings.get(QStringLiteral("settingsViewAnnotation")));
+    categories->addItem(m_strings.get(QStringLiteral("settingsShortcuts")));
+    categories->setCurrentRow(0);
+    connect(categories, &QListWidget::currentRowChanged, pages, &QStackedWidget::setCurrentIndex);
 
     auto *languageCombo = new QComboBox(generalPage);
     languageCombo->setObjectName(QStringLiteral("settingsLanguageCombo"));
@@ -5698,11 +5901,168 @@ void MainWindow::showSettingsDialog() {
         viewForm, viewPage, QStringLiteral("settingsCrosshair"), m_strings.get(QStringLiteral("crosshair")),
         m_canvas->crosshairEnabledForShapeType(QStringLiteral("rectangle")));
 
+    auto *shortcutLayout = new QVBoxLayout(shortcutPage);
+    shortcutLayout->setContentsMargins(12, 4, 4, 4);
+    auto *shortcutSearch = new QLineEdit(shortcutPage);
+    shortcutSearch->setObjectName(QStringLiteral("shortcutSearch"));
+    shortcutSearch->setPlaceholderText(m_strings.get(QStringLiteral("shortcutSearch")));
+    shortcutSearch->setClearButtonEnabled(true);
+    shortcutLayout->addWidget(shortcutSearch);
+
+    auto *shortcutTable = new QTableWidget(shortcutPage);
+    shortcutTable->setObjectName(QStringLiteral("shortcutTable"));
+    shortcutTable->setColumnCount(4);
+    shortcutTable->setHorizontalHeaderLabels({
+        m_strings.get(QStringLiteral("shortcutCommand")),
+        m_strings.get(QStringLiteral("shortcutPrimary")),
+        m_strings.get(QStringLiteral("shortcutSecondary")),
+        QString()});
+    shortcutTable->verticalHeader()->hide();
+    shortcutTable->setSelectionMode(QAbstractItemView::NoSelection);
+    shortcutTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    shortcutTable->setAlternatingRowColors(true);
+    shortcutTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    shortcutTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    shortcutTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    shortcutTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Fixed);
+    shortcutTable->setColumnWidth(3, 38);
+    shortcutLayout->addWidget(shortcutTable, 1);
+
+    auto *shortcutFooter = new QHBoxLayout();
+    auto *shortcutConflict = new QLabel(shortcutPage);
+    shortcutConflict->setObjectName(QStringLiteral("shortcutConflictLabel"));
+    shortcutConflict->setStyleSheet(QStringLiteral("color: #b42318;"));
+    shortcutFooter->addWidget(shortcutConflict, 1);
+    auto *shortcutRestoreAll = new QPushButton(m_strings.get(QStringLiteral("shortcutRestoreAll")), shortcutPage);
+    shortcutRestoreAll->setObjectName(QStringLiteral("shortcutRestoreAll"));
+    shortcutFooter->addWidget(shortcutRestoreAll);
+    shortcutLayout->addLayout(shortcutFooter);
+
+    QHash<QString, QPair<ShortcutCaptureEdit *, ShortcutCaptureEdit *>> shortcutEditors;
+    const QVector<ShortcutCommand> shortcutCommands = pendingShortcuts.commands();
+    shortcutTable->setRowCount(shortcutCommands.size());
+    for (int row = 0; row < shortcutCommands.size(); ++row) {
+        const ShortcutCommand &command = shortcutCommands.at(row);
+        QAction *displayAction = m_shortcutActions.value(command.id).value(0, nullptr);
+        QString commandText = displayAction ? displayAction->text() : command.id;
+        commandText.remove(QLatin1Char('&'));
+        if (commandText.trimmed().isEmpty()) {
+            commandText = command.id;
+        }
+        auto *commandItem = new QTableWidgetItem(commandText);
+        commandItem->setData(Qt::UserRole, command.id);
+        commandItem->setData(Qt::UserRole + 1,
+                             QStringLiteral("%1 %2 %3").arg(commandText, command.id, command.category).toLower());
+        shortcutTable->setItem(row, 0, commandItem);
+
+        auto *primary = new ShortcutCaptureEdit(shortcutTable);
+        primary->setObjectName(QStringLiteral("shortcutPrimary_%1").arg(command.id));
+        auto *secondary = new ShortcutCaptureEdit(shortcutTable);
+        secondary->setObjectName(QStringLiteral("shortcutSecondary_%1").arg(command.id));
+        if (!command.shortcuts.isEmpty()) {
+            primary->setSequence(command.shortcuts.at(0));
+        }
+        if (command.shortcuts.size() > 1) {
+            secondary->setSequence(command.shortcuts.at(1));
+        }
+        shortcutTable->setCellWidget(row, 1, primary);
+        shortcutTable->setCellWidget(row, 2, secondary);
+        shortcutEditors.insert(command.id, qMakePair(primary, secondary));
+
+        auto *reset = new QToolButton(shortcutTable);
+        reset->setObjectName(QStringLiteral("shortcutReset_%1").arg(command.id));
+        reset->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
+        reset->setToolTip(m_strings.get(QStringLiteral("shortcutReset")));
+        reset->setAutoRaise(true);
+        shortcutTable->setCellWidget(row, 3, reset);
+    }
+
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    buttons->setObjectName(QStringLiteral("settingsButtons"));
+    QPushButton *okButton = buttons->button(QDialogButtonBox::Ok);
+    auto refreshShortcutConflicts = [&pendingShortcuts, &shortcutEditors, shortcutConflict, okButton, this]() {
+        for (auto it = shortcutEditors.cbegin(); it != shortcutEditors.cend(); ++it) {
+            for (ShortcutCaptureEdit *editor : {it.value().first, it.value().second}) {
+                editor->setProperty("shortcutConflict", false);
+                editor->style()->unpolish(editor);
+                editor->style()->polish(editor);
+            }
+        }
+        const QVector<ShortcutConflict> conflicts = pendingShortcuts.conflicts();
+        for (const ShortcutConflict &conflict : conflicts) {
+            for (const ShortcutLocation &location : conflict.locations) {
+                const auto editors = shortcutEditors.value(location.commandId);
+                for (ShortcutCaptureEdit *editor : {editors.first, editors.second}) {
+                    if (editor && editor->sequence() == conflict.sequence) {
+                        editor->setProperty("shortcutConflict", true);
+                        editor->style()->unpolish(editor);
+                        editor->style()->polish(editor);
+                    }
+                }
+            }
+        }
+        const bool valid = conflicts.isEmpty();
+        okButton->setEnabled(valid);
+        shortcutConflict->setText(valid ? QString() : m_strings.get(QStringLiteral("shortcutConflict")));
+    };
+    auto updateShortcutCommand = [&pendingShortcuts, &shortcutEditors, &refreshShortcutConflicts](const QString &commandId) {
+        const auto editors = shortcutEditors.value(commandId);
+        QList<QKeySequence> sequences;
+        if (editors.first && !editors.first->sequence().isEmpty()) {
+            sequences.append(editors.first->sequence());
+        }
+        if (editors.second && !editors.second->sequence().isEmpty()) {
+            sequences.append(editors.second->sequence());
+        }
+        pendingShortcuts.setShortcuts(commandId, sequences);
+        refreshShortcutConflicts();
+    };
+    for (auto it = shortcutEditors.cbegin(); it != shortcutEditors.cend(); ++it) {
+        const QString commandId = it.key();
+        connect(it.value().first, &ShortcutCaptureEdit::sequenceChanged, &dialog,
+                [commandId, &updateShortcutCommand](const QKeySequence &) { updateShortcutCommand(commandId); });
+        connect(it.value().second, &ShortcutCaptureEdit::sequenceChanged, &dialog,
+                [commandId, &updateShortcutCommand](const QKeySequence &) { updateShortcutCommand(commandId); });
+        if (auto *reset = shortcutTable->findChild<QToolButton *>(QStringLiteral("shortcutReset_%1").arg(commandId))) {
+            connect(reset, &QToolButton::clicked, &dialog, [commandId, &pendingShortcuts, &shortcutEditors,
+                                                            &refreshShortcutConflicts]() {
+                pendingShortcuts.reset(commandId);
+                const ShortcutCommand command = pendingShortcuts.command(commandId);
+                const auto editors = shortcutEditors.value(commandId);
+                editors.first->setSequence(command.shortcuts.value(0));
+                editors.second->setSequence(command.shortcuts.value(1));
+                refreshShortcutConflicts();
+            });
+        }
+    }
+    connect(shortcutRestoreAll, &QPushButton::clicked, &dialog,
+            [&pendingShortcuts, &shortcutEditors, &refreshShortcutConflicts]() {
+        pendingShortcuts.resetAll();
+        for (const ShortcutCommand &command : pendingShortcuts.commands()) {
+            const auto editors = shortcutEditors.value(command.id);
+            editors.first->setSequence(command.shortcuts.value(0));
+            editors.second->setSequence(command.shortcuts.value(1));
+        }
+        refreshShortcutConflicts();
+    });
+    connect(shortcutSearch, &QLineEdit::textChanged, shortcutTable,
+            [shortcutTable](const QString &text) {
+        const QString query = text.trimmed().toLower();
+        for (int row = 0; row < shortcutTable->rowCount(); ++row) {
+            const QString haystack = shortcutTable->item(row, 0)->data(Qt::UserRole + 1).toString();
+            shortcutTable->setRowHidden(row, !query.isEmpty() && !haystack.contains(query));
+        }
+    });
+    refreshShortcutConflicts();
+
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     auto *layout = new QVBoxLayout(&dialog);
-    layout->addWidget(tabs);
+    auto *contentLayout = new QHBoxLayout();
+    contentLayout->setSpacing(0);
+    contentLayout->addWidget(categories);
+    contentLayout->addWidget(pages, 1);
+    layout->addLayout(contentLayout, 1);
     layout->addWidget(buttons);
 
     if (dialog.exec() != QDialog::Accepted) {
@@ -5712,6 +6072,9 @@ void MainWindow::showSettingsDialog() {
         return;
     }
 
+    if (pendingShortcuts.hasConflicts()) {
+        return;
+    }
     const QString language = languageCombo->currentData().toString();
     if (!language.isEmpty() && language != m_strings.language()) {
         changeLanguage(language);
@@ -5796,6 +6159,9 @@ void MainWindow::showSettingsDialog() {
     m_canvas->setDoubleClickClose(doubleClickClose->isChecked());
     m_canvas->setSnapping(snapping->isChecked());
     m_canvas->setCrosshairEnabledForShapeType(QStringLiteral("rectangle"), crosshair->isChecked());
+    m_shortcutRegistry = pendingShortcuts;
+    m_shortcutRegistry.saveOverrides(m_settings);
+    applyShortcutRegistry();
     saveSettings();
     refreshActions();
 }
@@ -6898,30 +7264,6 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
 void MainWindow::keyPressEvent(QKeyEvent *event) {
     if (event->key() == Qt::Key_Control) {
         m_canvas->setDrawSquare(true);
-    } else if (event->modifiers() == Qt::NoModifier && event->key() == Qt::Key_W) {
-        setCreateMode();
-    } else if (event->modifiers() == Qt::NoModifier && event->key() == Qt::Key_V) {
-        setViewMode();
-    } else if (event->modifiers() == Qt::NoModifier && event->key() == Qt::Key_Z) {
-        selectAdjacentLabel(-1);
-    } else if (event->modifiers() == Qt::NoModifier && event->key() == Qt::Key_C) {
-        selectAdjacentLabel(1);
-    } else if (event->modifiers() == Qt::NoModifier && event->key() == Qt::Key_S) {
-        deleteCurrentShape();
-    } else if (event->modifiers() == Qt::NoModifier && event->key() == Qt::Key_X) {
-        if (m_deleteAction->isEnabled()) {
-            deleteCurrentShape();
-        }
-    } else if (event->modifiers() == Qt::ControlModifier && event->key() == Qt::Key_Z) {
-        if (!m_canvas->undoLastDrawingPoint()) {
-            undoShapeOperation();
-        }
-    } else if (event->modifiers() == Qt::ControlModifier && event->key() == Qt::Key_Y) {
-        redoShapeOperation();
-    } else if (event->modifiers() == Qt::NoModifier && event->key() == Qt::Key_Q) {
-        selectAdjacentShape(-1);
-    } else if (event->modifiers() == Qt::NoModifier && event->key() == Qt::Key_E) {
-        selectAdjacentShape(1);
     } else {
         QMainWindow::keyPressEvent(event);
     }
@@ -7022,25 +7364,6 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
             auto *mouseEvent = static_cast<QMouseEvent *>(event);
             if (!m_uniqueLabelList->itemAt(mouseEvent->position().toPoint())) {
                 m_uniqueLabelList->clearSelection();
-            }
-        }
-    }
-    if ((watched == m_canvas || watched == m_labelList) && event->type() == QEvent::KeyPress) {
-        auto *keyEvent = static_cast<QKeyEvent *>(event);
-        if (keyEvent->modifiers() == Qt::NoModifier) {
-            if (keyEvent->key() == Qt::Key_Q) {
-                selectAdjacentShape(-1);
-                return true;
-            }
-            if (keyEvent->key() == Qt::Key_E) {
-                selectAdjacentShape(1);
-                return true;
-            }
-            if (keyEvent->key() == Qt::Key_X) {
-                if (m_deleteAction->isEnabled()) {
-                    deleteCurrentShape();
-                }
-                return true;
             }
         }
     }

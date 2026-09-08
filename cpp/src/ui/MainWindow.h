@@ -4,6 +4,7 @@
 #include "core/AiAssistSession.h"
 #include "core/LabelMeConfig.h"
 #include "core/PerformanceMonitor.h"
+#include "core/ShortcutRegistry.h"
 #include "core/StringBundle.h"
 #include "ui/Canvas.h"
 #include "ui/FramelessTitleBar.h"
@@ -160,6 +161,10 @@ private:
 
     void createUi();
     void createActions();
+    void initializeShortcutRegistry();
+    void registerShortcutCommand(const QString &commandId, const QString &category,
+                                 const QList<QAction *> &actions);
+    void applyShortcutRegistry();
     void createMenusAndToolbars();
     void createFooterControls();
     void connectSignals();
@@ -260,6 +265,8 @@ private:
 
     StringBundle m_strings;
     QSettings m_settings;
+    ShortcutRegistry m_shortcutRegistry;
+    QHash<QString, QList<QAction *>> m_shortcutActions;
     Canvas *m_canvas = nullptr;
     QScrollArea *m_scrollArea = nullptr;
     QDockWidget *m_labelDock = nullptr;
@@ -350,6 +357,8 @@ private:
     QAction *m_redoAction = nullptr;
     QAction *m_prevShapeAction = nullptr;
     QAction *m_nextShapeAction = nullptr;
+    QAction *m_prevLabelAction = nullptr;
+    QAction *m_nextLabelAction = nullptr;
     QAction *m_deleteAction = nullptr;
     QAction *m_deleteAllShapesAction = nullptr;
     QAction *m_copyAction = nullptr;

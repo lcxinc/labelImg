@@ -32,6 +32,8 @@ set(CORE_SOURCES
     src/core/Shape.h
     src/core/StringBundle.cpp
     src/core/StringBundle.h
+    src/core/ShortcutRegistry.cpp
+    src/core/ShortcutRegistry.h
 )
 
 add_library(labelImgCppCore STATIC ${CORE_SOURCES})
@@ -58,6 +60,8 @@ add_executable(labelImgCpp
     src/ui/FramelessTitleBar.h
     src/ui/MiniMapOverlay.cpp
     src/ui/MiniMapOverlay.h
+    src/ui/ShortcutCaptureEdit.cpp
+    src/ui/ShortcutCaptureEdit.h
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
     ${APP_ICON_RC}
@@ -78,6 +82,8 @@ add_executable(labelImgCppUiTests
     src/ui/FramelessTitleBar.h
     src/ui/MiniMapOverlay.cpp
     src/ui/MiniMapOverlay.h
+    src/ui/ShortcutCaptureEdit.cpp
+    src/ui/ShortcutCaptureEdit.h
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
 )
@@ -85,3 +91,5 @@ target_link_libraries(labelImgCppUiTests PRIVATE labelImgCppCore Qt6::Widgets Qt
 add_test(NAME labelImgCppUiTests COMMAND labelImgCppUiTests)
 set_tests_properties(labelImgCppTests labelImgCppUiTests
     PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/..")
+set_tests_properties(labelImgCppUiTests
+    PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
