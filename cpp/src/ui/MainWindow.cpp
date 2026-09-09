@@ -64,6 +64,8 @@
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTimer>
+#include <QFutureWatcher>
+#include <QtConcurrentRun>
 #include <QThread>
 #include <QToolButton>
 #include <QToolBar>
@@ -334,6 +336,38 @@ QString labelFlagPresetSourceFromConfig(const QVariantMap &values) {
     }
     return lines.join(QLatin1Char('\n'));
 }
+
+class LabelSpaceConfirmFilter final : public QObject {
+public:
+    LabelSpaceConfirmFilter(QLineEdit *editor, QListWidget *history, QPushButton *ok, QObject *parent)
+        : QObject(parent), m_editor(editor), m_history(history), m_ok(ok) {
+        editor->installEventFilter(this);
+        history->installEventFilter(this);
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (event->type() == QEvent::KeyPress) {
+            auto *key = static_cast<QKeyEvent *>(event);
+            // The preselected label is ready for fast confirmation. Once the
+            // user edits it, spaces belong to the label just like normal text.
+            const bool ready = watched == m_history ||
+                               (watched == m_editor && m_editor->hasSelectedText() &&
+                                m_editor->selectedText() == m_editor->text());
+            if (ready && key->key() == Qt::Key_Space && key->modifiers() == Qt::NoModifier &&
+                !m_editor->text().trimmed().isEmpty()) {
+                if (!key->isAutoRepeat()) m_ok->click();
+                return true;
+            }
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    QLineEdit *m_editor;
+    QListWidget *m_history;
+    QPushButton *m_ok;
+};
 
 class LabelListKeyForwarder final : public QObject {
 public:
@@ -759,6 +793,13 @@ MainWindow::MainWindow(QWidget *parent, const QString &defaultConfigPath)
     installFramelessChrome();
     m_defaultDockState = saveState(DockStateVersion);
     connectSignals();
+    m_thumbnailPool.setMaxThreadCount(1);
+    const auto updateClipboard = [this]() {
+        m_externalClipboardHasShapes = !shapesFromClipboardMime(QApplication::clipboard()->mimeData()).isEmpty();
+        refreshActions();
+    };
+    connect(QApplication::clipboard(), &QClipboard::dataChanged, this, updateClipboard);
+    m_externalClipboardHasShapes = !shapesFromClipboardMime(QApplication::clipboard()->mimeData()).isEmpty();
     m_aiSession = new AiAssistSession(this);
     connect(m_aiSession, &AiAssistSession::responseReady,
             this, &MainWindow::onAiSessionResponse);
@@ -1830,9 +1871,13 @@ void MainWindow::createActions() {
     m_deleteAnnotationAction->setObjectName(QStringLiteral("deleteAnnotationAction"));
     m_createModeAction = new QAction(this);
     m_createModeAction->setObjectName(QStringLiteral("createModeAction"));
-    m_createModeAction->setShortcuts({QKeySequence("W"), QKeySequence("Ctrl+R")});
+    m_createModeAction->setShortcut(QKeySequence("Ctrl+R"));
     m_createModeAction->setCheckable(true);
     m_createModeAction->setChecked(false);
+    m_repeatCreateAction = new QAction(this);
+    m_repeatCreateAction->setObjectName(QStringLiteral("repeatCreateAction"));
+    m_repeatCreateAction->setShortcut(QKeySequence(QStringLiteral("W")));
+    m_repeatCreateAction->setAutoRepeat(false);
     m_createPolygonModeAction = new QAction(this);
     m_createPolygonModeAction->setObjectName(QStringLiteral("createPolygonModeAction"));
     m_createPolygonModeAction->setShortcuts({QKeySequence(QStringLiteral("P")),
@@ -2074,6 +2119,7 @@ void MainWindow::initializeShortcutRegistry() {
     add(QStringLiteral("copy_previous"), QStringLiteral("edit"), m_copyPreviousAction);
 
     add(QStringLiteral("create_rectangle"), QStringLiteral("mode"), m_createModeAction);
+    add(QStringLiteral("repeat_create"), QStringLiteral("mode"), m_repeatCreateAction);
     add(QStringLiteral("create_polygon"), QStringLiteral("mode"), m_createPolygonModeAction);
     add(QStringLiteral("create_point"), QStringLiteral("mode"), m_createPointModeAction);
     add(QStringLiteral("create_points"), QStringLiteral("mode"), m_createPointsModeAction);
@@ -2156,7 +2202,7 @@ void MainWindow::applyShortcutRegistry() {
                                           : shortcut);
     }
     if (m_footerCreateShortcut) {
-        m_footerCreateShortcut->setText(firstShortcutText(m_createModeAction));
+        m_footerCreateShortcut->setText(firstShortcutText(m_repeatCreateAction));
     }
     if (m_toolBar) {
         refreshActionToolTips();
@@ -2185,52 +2231,46 @@ void MainWindow::createMenusAndToolbars() {
 
     m_viewMenu = menuBar()->addMenu(QString());
     m_viewMenu->setObjectName(QStringLiteral("viewMenu"));
-    m_viewMenu->addActions({m_undoAction, m_undoLastPointAction, m_redoAction, m_copyShapesAction,
-                            m_pasteShapesAction, m_copyAction, m_deleteAction, m_deleteAllShapesAction});
-    m_viewMenu->addActions({m_prevShapeAction, m_nextShapeAction});
-    m_viewMenu->addAction(m_addPointToEdgeAction);
-    m_viewMenu->addAction(m_removeSelectedPointAction);
+    m_viewMenu->addActions({m_undoAction, m_redoAction});
     m_viewMenu->addSeparator();
-    m_viewMenu->addActions({m_showFlagDockAction, m_showLabelDockAction,
-                            m_showShapeDockAction, m_showFileDockAction});
-    m_viewMenu->addAction(m_resetLayoutAction);
+    const auto addViewSubmenu = [this](const QString &key, const QList<QAction *> &actions) {
+        QMenu *menu = m_viewMenu->addMenu(m_strings.get(key));
+        menu->setObjectName(key);
+        menu->setProperty("translationKey", key);
+        menu->addActions(actions);
+        return menu;
+    };
+    addViewSubmenu(QStringLiteral("menu_annotationEdit"),
+                   {m_undoLastPointAction, m_copyShapesAction, m_pasteShapesAction, m_copyAction,
+                    m_deleteAction, m_deleteAllShapesAction, m_prevShapeAction, m_nextShapeAction,
+                    m_addPointToEdgeAction, m_removeSelectedPointAction});
+    addViewSubmenu(QStringLiteral("menu_createShape"),
+                   {m_repeatCreateAction, m_createModeAction, m_createPolygonModeAction, m_createPointModeAction,
+                    m_createPointsModeAction, m_createLineModeAction, m_createLinestripModeAction,
+                    m_createCircleModeAction, m_createOrientedRectangleModeAction, m_createMaskModeAction,
+                    m_createAiPointsModeAction, m_createAiBoxModeAction});
+    addViewSubmenu(QStringLiteral("menu_annotationMode"),
+                   {m_advancedModeAction, m_editModeAction, m_viewModeAction, m_maskEditAction,
+                    m_editabilityAction, m_drawSquareAction});
+    addViewSubmenu(QStringLiteral("menu_annotationOptions"),
+                   {m_autoSaveAction, m_keepPreviousAction, m_singleClassAction, m_editLabelFlagsAction});
+    addViewSubmenu(QStringLiteral("menu_annotationDisplay"),
+                   {m_displayLabelsAction, m_fillDrawingAction, m_boxLineColorAction,
+                    m_hideAllAction, m_showAllAction, m_toggleAllAction});
     m_viewMenu->addSeparator();
-    m_viewMenu->addAction(m_advancedModeAction);
-    m_viewMenu->addAction(m_createModeAction);
-    m_viewMenu->addAction(m_createPolygonModeAction);
-    m_viewMenu->addAction(m_createPointModeAction);
-    m_viewMenu->addAction(m_createPointsModeAction);
-    m_viewMenu->addAction(m_createAiPointsModeAction);
-    m_viewMenu->addAction(m_createAiBoxModeAction);
-    m_viewMenu->addAction(m_createLineModeAction);
-    m_viewMenu->addAction(m_createLinestripModeAction);
-    m_viewMenu->addAction(m_createCircleModeAction);
-    m_viewMenu->addAction(m_createOrientedRectangleModeAction);
-    m_viewMenu->addAction(m_createMaskModeAction);
-    m_viewMenu->addAction(m_maskEditAction);
-    m_viewMenu->addAction(m_editModeAction);
-    m_viewMenu->addAction(m_viewModeAction);
-    m_viewMenu->addAction(m_editabilityAction);
-    m_viewMenu->addAction(m_autoSaveAction);
-    m_viewMenu->addAction(m_keepPreviousAction);
-    m_viewMenu->addAction(m_keepPreviousZoomAction);
-    m_viewMenu->addAction(m_singleClassAction);
-    m_viewMenu->addAction(m_displayLabelsAction);
-    m_viewMenu->addAction(m_editLabelFlagsAction);
-    m_viewMenu->addAction(m_drawSquareAction);
-    m_viewMenu->addAction(m_fillDrawingAction);
-    m_viewMenu->addAction(m_boxLineColorAction);
+    addViewSubmenu(QStringLiteral("menu_zoom"),
+                   {m_zoomInAction, m_zoomOutAction, m_zoomOriginalAction, m_fitWindowAction,
+                    m_fitWidthAction, m_keepPreviousZoomAction});
+    addViewSubmenu(QStringLiteral("menu_imageAdjustments"),
+                   {m_darkenAction, m_brightenAction, m_brightnessOriginalAction,
+                    m_brightnessContrastAction, m_keepPreviousBrightnessContrastAction});
+    QMenu *panelsMenu = addViewSubmenu(QStringLiteral("menu_panelsLayout"),
+                   {m_showFlagDockAction, m_showLabelDockAction, m_showShapeDockAction,
+                    m_showFileDockAction, m_miniMapAction, m_showPerformanceAction});
+    panelsMenu->addSeparator();
+    panelsMenu->addAction(m_resetLayoutAction);
+    addViewSubmenu(QStringLiteral("menu_browsing"), {m_samplingModeAction, m_thumbnailModeAction});
     m_viewMenu->addSeparator();
-    m_viewMenu->addActions({m_hideAllAction, m_showAllAction, m_toggleAllAction});
-    m_viewMenu->addSeparator();
-    m_viewMenu->addActions({m_zoomInAction, m_zoomOutAction, m_zoomOriginalAction});
-    m_viewMenu->addActions({m_fitWindowAction, m_fitWidthAction});
-    m_viewMenu->addActions({m_miniMapAction, m_showPerformanceAction, m_samplingModeAction, m_thumbnailModeAction});
-    m_viewMenu->addSeparator();
-    m_viewMenu->addActions({m_darkenAction, m_brightenAction, m_brightnessOriginalAction});
-    m_viewMenu->addAction(m_brightnessContrastAction);
-    m_viewMenu->addAction(m_keepPreviousBrightnessContrastAction);
-
     m_languageMenu = m_viewMenu->addMenu(QString());
     QHash<QString, QString> languageNames{{"en", "English"}, {"zh-CN", QString::fromUtf8("简体中文")},
                                           {"zh-TW", QString::fromUtf8("繁體中文")}, {"ja-JP", QString::fromUtf8("日本語")}};
@@ -2343,7 +2383,7 @@ void MainWindow::createFooterControls() {
         const QString mode = m_footerModeCombo->itemData(index).toString();
         if (mode == QStringLiteral("view")) setViewMode();
         else if (mode == QStringLiteral("edit")) setEditMode();
-        else if (mode == QStringLiteral("create")) setCreateMode();
+        else if (mode == QStringLiteral("create")) repeatCreateMode();
     });
 
     auto makeShortcutButton = [this](const QString &objectName, const QString &text, const QString &tooltip) {
@@ -2365,7 +2405,7 @@ void MainWindow::createFooterControls() {
                                                 m_strings.get(QStringLiteral("footerCreateTooltip")));
     connect(m_footerViewShortcut, &QToolButton::clicked, this, &MainWindow::setViewMode);
     connect(m_footerEditShortcut, &QToolButton::clicked, this, &MainWindow::setEditMode);
-    connect(m_footerCreateShortcut, &QToolButton::clicked, this, &MainWindow::setCreateMode);
+    connect(m_footerCreateShortcut, &QToolButton::clicked, this, &MainWindow::repeatCreateMode);
 
     auto *modePanel = new QWidget(this);
     modePanel->setObjectName(QStringLiteral("footerModePanel"));
@@ -2508,6 +2548,7 @@ void MainWindow::connectSignals() {
     connect(m_deleteImageAction, &QAction::triggered, this, &MainWindow::deleteCurrentImage);
     connect(m_deleteAnnotationAction, &QAction::triggered, this, &MainWindow::deleteCurrentAnnotationFile);
     connect(m_createModeAction, &QAction::triggered, this, &MainWindow::setCreateMode);
+    connect(m_repeatCreateAction, &QAction::triggered, this, &MainWindow::repeatCreateMode);
     connect(m_createPolygonModeAction, &QAction::triggered, this, &MainWindow::setPolygonCreateMode);
     connect(m_createPointModeAction, &QAction::triggered, this, &MainWindow::setPointCreateMode);
     connect(m_createPointsModeAction, &QAction::triggered, this, &MainWindow::setPointsCreateMode);
@@ -2649,6 +2690,7 @@ void MainWindow::connectSignals() {
     connect(m_canvas, &Canvas::scaleValueChanged, this, [this](double) { syncZoomWidget(); });
     connect(m_canvas, &Canvas::frameRendered, this, &MainWindow::onCanvasFrameRendered);
     connect(m_canvas, &Canvas::editModeRequested, this, &MainWindow::setEditMode);
+    connect(m_canvas, &Canvas::viewModeRequested, this, &MainWindow::setViewMode);
     connect(m_canvas, &Canvas::shapeCreated, this, &MainWindow::onCanvasShapeCreated);
     connect(m_canvas, &Canvas::previousShapeRequested, this, [this]() { selectAdjacentShape(-1); });
     connect(m_canvas, &Canvas::nextShapeRequested, this, [this]() { selectAdjacentShape(1); });
@@ -2689,6 +2731,10 @@ void MainWindow::connectSignals() {
         }
     });
     m_canvas->installEventFilter(this);
+    m_fileList->viewport()->installEventFilter(this);
+    connect(m_fileList->verticalScrollBar(), &QScrollBar::valueChanged, this, [this]() {
+        loadVisibleFileThumbnails();
+    });
     m_labelList->installEventFilter(this);
     m_uniqueLabelList->installEventFilter(this);
     connect(m_performanceMonitor, &PerformanceMonitor::performanceUpdated, this, [this](const QString &text) {
@@ -2706,6 +2752,8 @@ void MainWindow::connectSignals() {
         // cancelled label popup can restore the exact pre-creation state.
         if (drawing) {
             m_shapeEditDirtyBefore = m_dirty;
+        } else {
+            scheduleAutoSave();
         }
         refreshActions();
     });
@@ -2727,7 +2775,7 @@ void MainWindow::connectSignals() {
     });
     connect(m_fileSearchEdit, &QLineEdit::textChanged, this, [this](const QString &text) {
         m_fileNameFilter = text.trimmed();
-        populateFileList();
+        populateFileList(false);
     });
     connect(m_filterCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onFilterChanged);
     connect(m_aiModelCombo, &QComboBox::currentTextChanged, this, [this]() {
@@ -3373,27 +3421,46 @@ bool MainWindow::loadStandaloneLabelMe(const QString &path) {
     return true;
 }
 
-AnnotationDocument MainWindow::annotationDocumentForImage(const QString &imagePath, const QSize &imageSize,
-                                                          SaveFormat *detectedFormat,
-                                                          QString *errorMessage) const {
+AnnotationDocument MainWindow::readAnnotationForImage(const QString &imagePath, const QSize &imageSize,
+                                         const QString &saveDir, const QString &outputFilePath,
+                                         SaveFormat format, SaveFormat *detectedFormat,
+                                         QString *errorMessage, bool previewOnly) {
+    const auto readLabelMe = [previewOnly](const QString &path, AnnotationDocument *document, QString *error) {
+        if (!previewOnly) return AnnotationIO::loadLabelMe(path, document, error);
+        // Indexing and thumbnails only need metadata. Actual annotation loading
+        // still performs full imageData validation in AnnotationIO::loadLabelMe.
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) return false;
+        const QJsonDocument json = QJsonDocument::fromJson(file.readAll());
+        if (!json.isObject() || !json.object().value("shapes").isArray()) return false;
+        const QJsonObject root = json.object();
+        document->imagePath = root.value("imagePath").toString();
+        document->imageSize = QSize(root.value("imageWidth").toInt(), root.value("imageHeight").toInt());
+        document->shapes.clear();
+        for (const QJsonValue &value : root.value("shapes").toArray()) {
+            Shape shape;
+            if (value.isObject() && shapeFromClipboardJson(value.toObject(), &shape)) document->shapes.append(shape);
+        }
+        return true;
+    };
     if (errorMessage) {
         errorMessage->clear();
     }
     AnnotationDocument doc;
     if (detectedFormat) {
-        *detectedFormat = m_format;
+        *detectedFormat = format;
     }
     doc.imagePath = imagePath;
     doc.imageSize = imageSize;
-    if (m_format == SaveFormat::LabelMe && !m_outputFilePath.isEmpty()) {
-        const QFileInfo outputInfo(m_outputFilePath);
+    if (format == SaveFormat::LabelMe && !outputFilePath.isEmpty()) {
+        const QFileInfo outputInfo(outputFilePath);
         if (outputInfo.exists()) {
             QString labelMeError;
             AnnotationDocument fixedDocument;
-            if (!AnnotationIO::loadLabelMe(m_outputFilePath, &fixedDocument, &labelMeError)) {
+            if (!readLabelMe(outputFilePath, &fixedDocument, &labelMeError)) {
                 if (errorMessage) {
                     *errorMessage = QStringLiteral("%1: %2")
-                                        .arg(m_outputFilePath,
+                                        .arg(outputFilePath,
                                              labelMeError.isEmpty()
                                                  ? QStringLiteral("invalid LabelMe annotation")
                                                  : labelMeError);
@@ -3423,8 +3490,8 @@ AnnotationDocument MainWindow::annotationDocumentForImage(const QString &imagePa
     }
 
     QStringList dirs;
-    if (!m_saveDir.isEmpty()) {
-        dirs.append(m_saveDir);
+    if (!saveDir.isEmpty()) {
+        dirs.append(saveDir);
     }
     dirs.append(QFileInfo(imagePath).absolutePath());
     dirs.removeDuplicates();
@@ -3452,7 +3519,7 @@ AnnotationDocument MainWindow::annotationDocumentForImage(const QString &imagePa
         const QString jsonPath = base + ".json";
         if (QFileInfo::exists(jsonPath)) {
             QString labelMeError;
-            if (!AnnotationIO::loadLabelMe(jsonPath, &doc, &labelMeError)) {
+            if (!readLabelMe(jsonPath, &doc, &labelMeError)) {
                 if (AnnotationIO::loadCreateMl(jsonPath, imagePath, &doc) && detectedFormat) {
                     *detectedFormat = SaveFormat::CreateMl;
                 } else if (errorMessage) {
@@ -3472,6 +3539,13 @@ AnnotationDocument MainWindow::annotationDocumentForImage(const QString &imagePa
         doc.imageSize = imageSize;
     }
     return doc;
+}
+
+AnnotationDocument MainWindow::annotationDocumentForImage(const QString &imagePath, const QSize &imageSize,
+                                                          SaveFormat *detectedFormat,
+                                                          QString *errorMessage) const {
+    return readAnnotationForImage(imagePath, imageSize, m_saveDir, m_outputFilePath,
+                                  m_format, detectedFormat, errorMessage);
 }
 
 void MainWindow::loadAnnotationsForCurrentImage(QString *errorMessage) {
@@ -3596,12 +3670,14 @@ void MainWindow::syncShapeOrderFromLabelList() {
     setDirty(true);
 }
 
-void MainWindow::populateFileList() {
+void MainWindow::populateFileList(bool reloadMetadata) {
     if (!m_fileList) {
         return;
     }
 
-    rebuildFileLabelFilterMenu();
+    rebuildFileLabelFilterMenu(reloadMetadata);
+    const QSignalBlocker listBlocker(m_fileList);
+    m_fileList->setUpdatesEnabled(false);
     const bool thumbnailMode = m_thumbnailModeAction && m_thumbnailModeAction->isChecked();
     QRegularExpression fileSearchPattern;
     bool fileSearchPatternValid = true;
@@ -3610,6 +3686,10 @@ void MainWindow::populateFileList() {
                                                 QRegularExpression::CaseInsensitiveOption);
         fileSearchPatternValid = fileSearchPattern.isValid();
     }
+    ++m_thumbnailGeneration;
+    if (reloadMetadata) m_thumbnailCache.clear();
+    m_fileItems.clear();
+    m_displayedThumbnails.clear();
     m_fileList->clear();
     m_fileList->setViewMode(QListView::ListMode);
     m_fileList->setMovement(QListView::Static);
@@ -3625,24 +3705,25 @@ void MainWindow::populateFileList() {
             !fileSearchPattern.match(path).hasMatch()) {
             continue;
         }
-        if (!m_fileLabelFilter.isEmpty() && !labelsForImage(path).contains(m_fileLabelFilter)) {
+        if (!m_fileLabelFilter.isEmpty() && !m_fileLabels.value(path).contains(m_fileLabelFilter)) {
             continue;
         }
         auto *item = new QListWidgetItem(path);
         item->setToolTip(path);
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-        item->setCheckState(hasAnnotationForImage(path) ? Qt::Checked : Qt::Unchecked);
+        item->setCheckState(m_annotatedFiles.contains(path) ? Qt::Checked : Qt::Unchecked);
         item->setSizeHint(thumbnailMode ? QSize(0, 64) : QSize(0, 22));
-        if (thumbnailMode) {
-            item->setIcon(fileThumbnailIcon(path));
-        }
         m_fileList->addItem(item);
+        m_fileItems.insert(path, item);
     }
     refreshFileListSelection();
     updateFileDockTitle();
+    m_fileList->setUpdatesEnabled(true);
+    if (thumbnailMode) QTimer::singleShot(0, this, &MainWindow::loadVisibleFileThumbnails);
 }
 
-QIcon MainWindow::fileThumbnailIcon(const QString &path) const {
+QImage MainWindow::readFileThumbnail(const QString &path, const QString &saveDir,
+                         const QString &outputFilePath, SaveFormat format) {
     QSize sourceSize;
     const QImage image = ImageIO::readPreview(path, 512, &sourceSize);
     if (image.isNull()) {
@@ -3657,14 +3738,15 @@ QIcon MainWindow::fileThumbnailIcon(const QString &path) const {
     const QRect targetRect(QPoint((iconSize.width() - scaledSize.width()) / 2,
                                   (iconSize.height() - scaledSize.height()) / 2),
                            scaledSize);
-    QPixmap thumbnail(iconSize);
+    QImage thumbnail(iconSize, QImage::Format_RGB32);
     thumbnail.fill(QColor(250, 250, 250));
 
     QPainter painter(&thumbnail);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
     painter.drawImage(targetRect, image);
 
-    const AnnotationDocument doc = annotationDocumentForImage(path, sourceSize);
+    const AnnotationDocument doc = readAnnotationForImage(path, sourceSize, saveDir, outputFilePath,
+                                                         format, nullptr, nullptr, true);
     if (!doc.imageSize.isEmpty()) {
         const double xScale = static_cast<double>(targetRect.width()) / doc.imageSize.width();
         const double yScale = static_cast<double>(targetRect.height()) / doc.imageSize.height();
@@ -3679,19 +3761,72 @@ QIcon MainWindow::fileThumbnailIcon(const QString &path) const {
                                     box.height() * yScale));
         }
     }
-    return QIcon(thumbnail);
+    return thumbnail;
+}
+
+void MainWindow::loadVisibleFileThumbnails() {
+    if (m_thumbnailLoading || !m_fileList || !m_thumbnailModeAction->isChecked() ||
+        !m_fileList->isVisible() || m_fileList->count() == 0) return;
+    const QRect viewport = m_fileList->viewport()->rect();
+    int first = -1;
+    for (int y = 0; y < qMin(80, viewport.height()) && first < 0; ++y) {
+        first = m_fileList->indexAt(QPoint(viewport.width() / 2, y)).row();
+    }
+    if (first < 0) return;
+    QSet<QString> visiblePaths;
+    for (int row = first; row < m_fileList->count(); ++row) {
+        auto *item = m_fileList->item(row);
+        if (m_fileList->visualItemRect(item).top() > viewport.bottom() + 64) break;
+        visiblePaths.insert(item->text());
+    }
+    // QListWidgetItem keeps a shared copy of its icon. Clear offscreen copies
+    // too, otherwise visiting every row defeats the bounded thumbnail cache.
+    for (const QString &path : std::as_const(m_displayedThumbnails)) {
+        if (!visiblePaths.contains(path)) {
+            if (auto *item = m_fileItems.value(path)) item->setIcon(QIcon());
+        }
+    }
+    m_displayedThumbnails = visiblePaths;
+    for (int row = first; row < m_fileList->count(); ++row) {
+        QListWidgetItem *item = m_fileList->item(row);
+        if (m_fileList->visualItemRect(item).top() > viewport.bottom() + 64) break;
+        const QString path = item->text();
+        if (QIcon *cached = m_thumbnailCache.object(path)) {
+            item->setIcon(*cached);
+            continue;
+        }
+        m_thumbnailLoading = true;
+        const quint64 generation = m_thumbnailGeneration;
+        const QString saveDir = m_saveDir;
+        const QString outputFilePath = m_outputFilePath;
+        const SaveFormat format = m_format;
+        auto *watcher = new QFutureWatcher<QImage>(this);
+        connect(watcher, &QFutureWatcher<QImage>::finished, this, [this, watcher, path, generation]() {
+            const QImage image = watcher->result();
+            watcher->deleteLater();
+            m_thumbnailLoading = false;
+            if (generation == m_thumbnailGeneration) {
+                const QIcon icon = image.isNull() ? QIcon() : QIcon(QPixmap::fromImage(image));
+                // Cache failures too: a corrupt image must not start an endless decode loop.
+                m_thumbnailCache.insert(path, new QIcon(icon));
+                if (QListWidgetItem *item = m_fileItems.value(path)) {
+                    if (m_fileList->visualItemRect(item).intersects(m_fileList->viewport()->rect())) item->setIcon(icon);
+                }
+            }
+            QTimer::singleShot(0, this, &MainWindow::loadVisibleFileThumbnails);
+        });
+        watcher->setFuture(QtConcurrent::run(&m_thumbnailPool, [path, saveDir, outputFilePath, format]() {
+            return readFileThumbnail(path, saveDir, outputFilePath, format);
+        }));
+        break; // One decoder and only visible work: no directory-sized queue or memory spike.
+    }
 }
 
 QStringList MainWindow::labelsForImage(const QString &path) const {
-    QImageReader reader(path);
-    reader.setAutoTransform(true);
-    QSize imageSize = reader.size();
-    if (!imageSize.isValid() || imageSize.isEmpty()) {
-        const QImage image = readImageWithAutoTransform(path);
-        imageSize = image.size();
-    }
-
-    const AnnotationDocument doc = annotationDocumentForImage(path, imageSize);
+    // Label extraction does not need image pixels or actual box coordinates.
+    // A valid unit size lets YOLO decode labels without opening the image.
+    const AnnotationDocument doc = readAnnotationForImage(path, QSize(1, 1), m_saveDir,
+                                                         m_outputFilePath, m_format, nullptr, nullptr, true);
     QSet<QString> uniqueLabels;
     for (const Shape &shape : doc.shapes) {
         const QString label = shape.label.trimmed();
@@ -3704,14 +3839,47 @@ QStringList MainWindow::labelsForImage(const QString &path) const {
     return labels;
 }
 
-void MainWindow::rebuildFileLabelFilterMenu() {
+void MainWindow::rebuildFileLabelFilterMenu(bool reloadLabels) {
     if (!m_fileLabelFilterMenu) {
         return;
     }
 
+    if (reloadLabels) {
+        m_fileLabels.clear();
+        m_annotatedFiles.clear();
+        // Enumerate sidecars once per directory instead of issuing three file
+        // existence probes per image (especially costly on large/network folders).
+        const auto pathKey = [](const QString &path) {
+#ifdef Q_OS_WIN
+            return path.toCaseFolded();
+#else
+            return path;
+#endif
+        };
+        QSet<QString> directories;
+        for (const QString &path : m_imageList) directories.insert(QFileInfo(path).absolutePath());
+        const QString saveDirectory = m_saveDir.isEmpty() ? QString() : QFileInfo(m_saveDir).absoluteFilePath();
+        if (!saveDirectory.isEmpty()) directories.insert(saveDirectory);
+        QHash<QString, QSet<QString>> annotationNames;
+        for (const QString &directory : directories) {
+            QSet<QString> names;
+            const QStringList sidecars = QDir(directory).entryList(
+                {"*.xml", "*.txt", "*.json"}, QDir::Files, QDir::NoSort);
+            for (const QString &name : sidecars) names.insert(pathKey(QFileInfo(name).completeBaseName()));
+            annotationNames.insert(directory, names);
+        }
+        for (const QString &path : m_imageList) {
+            const QFileInfo info(path);
+            const QString base = pathKey(info.completeBaseName());
+            const bool annotated = annotationNames.value(info.absolutePath()).contains(base) ||
+                                   (!saveDirectory.isEmpty() && annotationNames.value(saveDirectory).contains(base));
+            if (annotated) m_annotatedFiles.insert(path);
+            if (annotated || !m_outputFilePath.isEmpty()) m_fileLabels.insert(path, labelsForImage(path));
+        }
+    }
     QHash<QString, int> labelCounts;
     for (const QString &path : m_imageList) {
-        const QStringList labels = labelsForImage(path);
+        const QStringList labels = m_fileLabels.value(path);
         for (const QString &label : labels) {
             labelCounts[label] += 1;
         }
@@ -3728,7 +3896,7 @@ void MainWindow::rebuildFileLabelFilterMenu() {
         action->setData(label);
         connect(action, &QAction::triggered, this, [this, label]() {
             m_fileLabelFilter = label;
-            populateFileList();
+            populateFileList(false);
         });
     };
 
@@ -3741,6 +3909,58 @@ void MainWindow::rebuildFileLabelFilterMenu() {
     for (const QString &label : labels) {
         addFilterAction(label, QStringLiteral("%1 (%2)").arg(label).arg(labelCounts.value(label)));
     }
+}
+
+void MainWindow::refreshSavedFileItem() {
+    if (!m_fileList || m_imageList.isEmpty()) return;
+    // Saving one annotation must not decode every image in the directory.
+    ++m_thumbnailGeneration;
+    m_thumbnailCache.remove(m_filePath);
+    m_fileLabels.insert(m_filePath, labelsForImage(m_filePath));
+    if (hasAnnotationForImage(m_filePath)) m_annotatedFiles.insert(m_filePath);
+    else m_annotatedFiles.remove(m_filePath);
+    const QString oldFilter = m_fileLabelFilter;
+    rebuildFileLabelFilterMenu(false);
+    if (oldFilter != m_fileLabelFilter) {
+        // The last occurrence of the selected label was removed; restore all files.
+        populateFileList();
+        return;
+    }
+    const auto items = m_fileList->findItems(m_filePath, Qt::MatchExactly);
+    const QRegularExpression pattern(m_fileNameFilter, QRegularExpression::CaseInsensitiveOption);
+    const bool matches = (m_fileLabelFilter.isEmpty() || m_fileLabels.value(m_filePath).contains(m_fileLabelFilter)) &&
+                         (m_fileNameFilter.isEmpty() || !pattern.isValid() || pattern.match(m_filePath).hasMatch());
+    if (!matches) {
+        m_fileItems.remove(m_filePath);
+        for (QListWidgetItem *item : items) delete m_fileList->takeItem(m_fileList->row(item));
+        updateFileDockTitle();
+        return;
+    }
+    QListWidgetItem *item = items.isEmpty() ? nullptr : items.first();
+    const bool newItem = !item;
+    const bool thumbnails = m_thumbnailModeAction && m_thumbnailModeAction->isChecked();
+    if (!item) {
+        QSet<QString> preceding;
+        for (const QString &path : m_imageList) {
+            if (path == m_filePath) break;
+            preceding.insert(path);
+        }
+        int row = 0;
+        while (row < m_fileList->count() && preceding.contains(m_fileList->item(row)->text())) ++row;
+        item = new QListWidgetItem(m_filePath);
+        item->setToolTip(m_filePath);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setSizeHint(thumbnails ? QSize(0, 64) : QSize(0, 22));
+        m_fileList->insertItem(row, item);
+    }
+    item->setCheckState(hasAnnotationForImage(m_filePath) ? Qt::Checked : Qt::Unchecked);
+    m_fileItems.insert(m_filePath, item);
+    if (thumbnails) {
+        item->setIcon(QIcon());
+        loadVisibleFileThumbnails();
+    }
+    if (newItem) refreshFileListSelection();
+    updateFileDockTitle();
 }
 
 void MainWindow::updateFileDockTitle() {
@@ -3773,10 +3993,15 @@ void MainWindow::refreshFileListSelection() {
     QListWidgetItem *activeItem = nullptr;
     for (int i = 0; i < m_fileList->count(); ++i) {
         QListWidgetItem *item = m_fileList->item(i);
-        const QString itemPath = QFileInfo(item->text()).absoluteFilePath();
+        const QString itemPath = item->text(); // File list paths are normalized on import.
         const bool active = itemPath == m_filePath;
         const bool visited = !active && m_viewedFiles.contains(itemPath);
         const bool marked = m_markedFiles.contains(itemPath);
+        if (active) activeItem = item;
+        if (item->data(ActiveFileRole).isValid() && item->data(ActiveFileRole).toBool() == active &&
+            item->data(VisitedFileRole).toBool() == visited && item->data(MarkedFileRole).toBool() == marked) {
+            continue;
+        }
         item->setData(ActiveFileRole, active);
         item->setData(VisitedFileRole, visited);
         item->setData(MarkedFileRole, marked);
@@ -3842,6 +4067,7 @@ void MainWindow::refreshTexts() {
     m_deleteImageAction->setText(m_strings.get("deleteImg"));
     m_deleteAnnotationAction->setText(m_strings.get("deleteAnnotation"));
     m_createModeAction->setText(m_strings.get("crtBox"));
+    m_repeatCreateAction->setText(m_strings.get("repeatCreate"));
     m_createPolygonModeAction->setText(m_strings.get("createPolygon"));
     m_createPointModeAction->setText(m_strings.get("createPoint"));
     m_createPointsModeAction->setText(m_strings.get("createPoints"));
@@ -3963,8 +4189,8 @@ void MainWindow::refreshTexts() {
         m_footerEditShortcut->setToolTip(m_strings.get(QStringLiteral("footerEditTooltip")));
     }
     if (m_footerCreateShortcut) {
-        m_footerCreateShortcut->setText(m_createModeAction->shortcuts().value(0).toString(QKeySequence::NativeText));
-        m_footerCreateShortcut->setToolTip(m_strings.get(QStringLiteral("footerCreateTooltip")));
+        m_footerCreateShortcut->setText(m_repeatCreateAction->shortcuts().value(0).toString(QKeySequence::NativeText));
+        m_footerCreateShortcut->setToolTip(m_strings.get(QStringLiteral("repeatCreateTooltip")));
     }
     m_fileDockCloseButton->setToolTip(m_strings.get("hideFileList"));
     m_labelDock->setWindowTitle(m_strings.get("labelDock"));
@@ -3975,6 +4201,12 @@ void MainWindow::refreshTexts() {
     updateFileDockTitle();
     m_fileMenu->setTitle(m_strings.get("menu_file"));
     m_viewMenu->setTitle(m_strings.get("menu_view"));
+    for (QAction *action : m_viewMenu->actions()) {
+        if (QMenu *submenu = action->menu()) {
+            const QString key = submenu->property("translationKey").toString();
+            if (!key.isEmpty()) submenu->setTitle(m_strings.get(key));
+        }
+    }
     m_helpMenu->setTitle(m_strings.get("menu_help"));
     m_languageMenu->setTitle(m_strings.get("language"));
     m_recentFilesMenu->setTitle(m_strings.get("menu_openRecent"));
@@ -4182,6 +4414,8 @@ void MainWindow::refreshActions() {
     bool hasImage = !m_filePath.isEmpty();
     const bool editingAllowed = !m_editabilityAction || m_editabilityAction->isChecked();
     const bool drawing = m_canvas->isDrawing();
+    m_repeatCreateAction->setEnabled(hasImage && editingAllowed && !drawing);
+    if (m_footerCreateShortcut) m_footerCreateShortcut->setEnabled(m_repeatCreateAction->isEnabled());
     // Canvas owns the editing selection. The label list can retain a visual
     // current row while it is being synchronized or filtered, so it must not
     // enable destructive/editing actions by itself.
@@ -4259,7 +4493,7 @@ void MainWindow::refreshActions() {
     m_copyAction->setEnabled(hasSelection && editingAllowed && !drawing);
     m_copyShapesAction->setEnabled(hasSelection && editingAllowed && !drawing);
     const bool hasClipboardShapes = !m_shapeClipboard.isEmpty() ||
-                                    !shapesFromClipboardMime(QApplication::clipboard()->mimeData()).isEmpty();
+                                    m_externalClipboardHasShapes;
     m_pasteShapesAction->setEnabled(hasImage && editingAllowed && !drawing && hasClipboardShapes);
     m_copyHereAction->setEnabled(hasSelection && editingAllowed && !drawing);
     m_moveHereAction->setEnabled(hasSelection && editingAllowed && !drawing);
@@ -4428,7 +4662,7 @@ QString MainWindow::preferredImageForCurrentDir() const {
 
 void MainWindow::setFileThumbnailMode(bool enabled) {
     m_settings.setValue("view/fileThumbnails", enabled);
-    populateFileList();
+    populateFileList(false);
 }
 
 void MainWindow::setFormat(SaveFormat format) {
@@ -4767,9 +5001,7 @@ bool MainWindow::saveCurrentFile() {
     if (m_format == SaveFormat::LabelMe) ok = AnnotationIO::saveLabelMe(path, doc);
     if (ok) {
         setDirty(false);
-        if (!m_imageList.isEmpty()) {
-            populateFileList();
-        }
+        refreshSavedFileItem();
     } else {
         statusBar()->showMessage(m_strings.get(QStringLiteral("failedSave")).arg(path), 8000);
     }
@@ -4832,9 +5064,7 @@ void MainWindow::saveFileAs() {
         m_hasAnnotationPathOverride = true;
         m_annotationLoadFailed = false;
         setDirty(false);
-        if (!m_imageList.isEmpty()) {
-            populateFileList();
-        }
+        refreshSavedFileItem();
     } else {
         statusBar()->showMessage(m_strings.get(QStringLiteral("failedSave")).arg(path), 8000);
     }
@@ -4844,6 +5074,7 @@ void MainWindow::changeSaveDir() {
     QString dir = QFileDialog::getExistingDirectory(this, m_strings.get("changeSaveDir"), m_saveDir);
     if (!dir.isEmpty()) {
         m_saveDir = dir;
+        populateFileList();
         m_settings.setValue("savedir", m_saveDir);
     }
 }
@@ -5095,6 +5326,8 @@ bool MainWindow::editCurrentLabel() {
     labelCombo->setFocus(Qt::PopupFocusReason);
     if (labelCombo->lineEdit()) {
         labelCombo->lineEdit()->selectAll();
+        new LabelSpaceConfirmFilter(labelCombo->lineEdit(), labelEditList,
+                                    buttons->button(QDialogButtonBox::Ok), &dialog);
     }
 
     if (dialog.exec() != QDialog::Accepted) {
@@ -6187,6 +6420,8 @@ void MainWindow::setCreateShapeMode(const QString &shapeType, QAction *activeAct
         setViewMode();
         return;
     }
+    m_lastCreateAction = activeAction;
+    m_lastCreateShapeType = shapeType;
     {
         QSignalBlocker createBlocker(m_createModeAction);
         QSignalBlocker polygonBlocker(m_createPolygonModeAction);
@@ -6262,6 +6497,11 @@ void MainWindow::updateAiModelAvailability(bool pointPrompt) {
             m_settings.setValue(QStringLiteral("ai/model"), m_aiModelCombo->currentData().toString());
         }
     }
+}
+
+void MainWindow::repeatCreateMode() {
+    if (m_filePath.isEmpty() || m_canvas->isDrawing() || !m_editabilityAction->isChecked()) return;
+    setCreateShapeMode(m_lastCreateShapeType, m_lastCreateAction ? m_lastCreateAction : m_createModeAction);
 }
 
 void MainWindow::setCreateMode() {
@@ -7124,6 +7364,7 @@ void MainWindow::onCanvasShapeEditFinished(bool changed) {
         m_lastShapeSnapshot = m_canvas->shapes();
     }
     refreshActions();
+    scheduleAutoSave();
 }
 
 void MainWindow::onCanvasShapesChanged() {
@@ -7251,6 +7492,23 @@ void MainWindow::changeLanguage(const QString &language) {
     refreshTexts();
 }
 
+void MainWindow::showEvent(QShowEvent *event) {
+    QMainWindow::showEvent(event);
+#ifdef Q_OS_WIN
+    if (QGuiApplication::platformName() == QStringLiteral("windows")) {
+        const HWND hwnd = reinterpret_cast<HWND>(winId());
+        const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        const LONG_PTR resizableStyle = style | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU;
+        if (style != resizableStyle) {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, resizableStyle);
+            // Keep system sizing/snap behavior while WM_NCCALCSIZE hides the frame.
+            SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
+    }
+#endif
+}
+
 void MainWindow::resizeEvent(QResizeEvent *event) {
     QMainWindow::resizeEvent(event);
     updateFitScale();
@@ -7353,6 +7611,10 @@ void MainWindow::changeEvent(QEvent *event) {
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+    if (m_fileList && watched == m_fileList->viewport() &&
+        (event->type() == QEvent::Resize || event->type() == QEvent::Show)) {
+        QTimer::singleShot(0, this, &MainWindow::loadVisibleFileThumbnails);
+    }
     if (watched == m_uniqueLabelList) {
         if (event->type() == QEvent::KeyPress) {
             auto *keyEvent = static_cast<QKeyEvent *>(event);
@@ -7386,10 +7648,22 @@ bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr
         return QMainWindow::nativeEvent(eventType, message, result);
     }
 
-    const int border = 8;
-    const QPoint globalPos(GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam));
-    const QRect titleFrame(m_titleBar->mapToGlobal(QPoint(0, 0)), m_titleBar->size());
-    const HitRegion region = hitRegionFor(frameGeometry(), titleFrame, globalPos, border);
+    // WM_NCHITTEST uses native screen pixels; QWidget geometry uses logical
+    // pixels. Keep edge tests native, and convert client coordinates only for
+    // Qt child-widget/title-bar tests (also works across mixed-DPI monitors).
+    RECT nativeRect;
+    POINT clientPoint{GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam)};
+    const QPoint nativePos(clientPoint.x, clientPoint.y);
+    if (!GetWindowRect(msg->hwnd, &nativeRect) || !ScreenToClient(msg->hwnd, &clientPoint)) {
+        return QMainWindow::nativeEvent(eventType, message, result);
+    }
+    const qreal scale = devicePixelRatioF();
+    const QPoint localPos(qFloor(clientPoint.x / scale), qFloor(clientPoint.y / scale));
+    const QRect nativeFrame(nativeRect.left, nativeRect.top,
+                            nativeRect.right - nativeRect.left, nativeRect.bottom - nativeRect.top);
+    HitRegion region = hitRegionFor(nativeFrame, {}, nativePos, qMax(1, qRound(8 * scale)));
+    const QRect titleFrame(m_titleBar->mapTo(this, QPoint(0, 0)), m_titleBar->size());
+    if (region == HitRegion::Client && titleFrame.contains(localPos)) region = HitRegion::Caption;
 
     switch (region) {
     case HitRegion::TopLeft:
@@ -7417,7 +7691,7 @@ bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr
         *result = HTBOTTOM;
         return true;
     case HitRegion::Caption: {
-        QWidget *child = childAt(mapFromGlobal(globalPos));
+        QWidget *child = childAt(localPos);
         for (QWidget *widget = child; widget; widget = widget->parentWidget()) {
             if (qobject_cast<QToolButton *>(widget) || qobject_cast<QMenuBar *>(widget) ||
                 qobject_cast<QToolBar *>(widget) || widget == m_titleToolContainer) {
@@ -7735,24 +8009,32 @@ void MainWindow::refreshWindowTitle() {
     if (m_dirty) {
         title += QLatin1Char('*');
     }
-    setWindowTitle(title);
-    updateFramelessChrome();
+    if (windowTitle() != title) {
+        setWindowTitle(title);
+        updateFramelessChrome();
+    }
 }
 
 void MainWindow::setDirty(bool dirty) {
     m_dirty = dirty;
     refreshWindowTitle();
-    if (dirty && m_autoSaveAction && m_autoSaveAction->isChecked() &&
+    scheduleAutoSave();
+    refreshActions();
+}
+
+void MainWindow::scheduleAutoSave() {
+    if (m_dirty && !m_canvas->isDrawing() && !m_shapeHistoryPending &&
+        m_autoSaveAction && m_autoSaveAction->isChecked() &&
         !m_filePath.isEmpty() && !m_autoSavePending) {
         m_autoSavePending = true;
         QTimer::singleShot(150, this, [this]() {
             m_autoSavePending = false;
-            if (m_dirty && m_autoSaveAction && m_autoSaveAction->isChecked() && !m_filePath.isEmpty()) {
+            if (m_dirty && !m_canvas->isDrawing() && !m_shapeHistoryPending &&
+                m_autoSaveAction && m_autoSaveAction->isChecked() && !m_filePath.isEmpty()) {
                 saveFile();
             }
         });
     }
-    refreshActions();
 }
 
 bool MainWindow::maybeSave() {

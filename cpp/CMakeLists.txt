@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Xml Test)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Xml Test Concurrent)
 
 set(CORE_SOURCES
     src/core/AiAssistBridge.cpp
@@ -66,7 +66,7 @@ add_executable(labelImgCpp
     src/ui/MainWindow.h
     ${APP_ICON_RC}
 )
-target_link_libraries(labelImgCpp PRIVATE labelImgCppCore Qt6::Widgets)
+target_link_libraries(labelImgCpp PRIVATE labelImgCppCore Qt6::Widgets Qt6::Concurrent)
 
 enable_testing()
 
@@ -87,7 +87,7 @@ add_executable(labelImgCppUiTests
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
 )
-target_link_libraries(labelImgCppUiTests PRIVATE labelImgCppCore Qt6::Widgets Qt6::Test)
+target_link_libraries(labelImgCppUiTests PRIVATE labelImgCppCore Qt6::Widgets Qt6::Test Qt6::Concurrent)
 add_test(NAME labelImgCppUiTests COMMAND labelImgCppUiTests)
 set_tests_properties(labelImgCppTests labelImgCppUiTests
     PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/..")

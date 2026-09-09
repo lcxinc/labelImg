@@ -16,6 +16,8 @@
 #include <QComboBox>
 #include <QElapsedTimer>
 #include <QHash>
+#include <QCache>
+#include <QThreadPool>
 #include <QLabel>
 #include <QListWidget>
 #include <QMainWindow>
@@ -48,6 +50,7 @@ public:
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    void showEvent(QShowEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void keyReleaseEvent(QKeyEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
@@ -111,6 +114,7 @@ private slots:
     void showSettingsDialog();
     void setAdvancedMode(bool enabled);
     void setCreateMode();
+    void repeatCreateMode();
     void setPolygonCreateMode();
     void setPointCreateMode();
     void setPointsCreateMode();
@@ -192,14 +196,30 @@ private:
     AnnotationDocument annotationDocumentForImage(const QString &imagePath, const QSize &imageSize,
                                                   SaveFormat *detectedFormat = nullptr,
                                                   QString *errorMessage = nullptr) const;
+    static AnnotationDocument readAnnotationForImage(const QString &imagePath, const QSize &imageSize,
+                                                      const QString &saveDir, const QString &outputFilePath,
+                                                      SaveFormat format, SaveFormat *detectedFormat = nullptr,
+                                                      QString *errorMessage = nullptr, bool previewOnly = false);
+    static QImage readFileThumbnail(const QString &path, const QString &saveDir,
+                                    const QString &outputFilePath, SaveFormat format);
     void loadAnnotationsForCurrentImage(QString *errorMessage = nullptr);
     void refreshLabels();
     void refreshUniqueLabelList();
     void syncShapeOrderFromLabelList();
-    void populateFileList();
-    QIcon fileThumbnailIcon(const QString &path) const;
+    void populateFileList(bool reloadMetadata = true);
+    void refreshSavedFileItem();
+    void loadVisibleFileThumbnails();
+    QThreadPool m_thumbnailPool;
+    QCache<QString, QIcon> m_thumbnailCache{256};
+    QHash<QString, QListWidgetItem *> m_fileItems;
+    QSet<QString> m_displayedThumbnails;
+    quint64 m_thumbnailGeneration = 0;
+    bool m_thumbnailLoading = false;
+    bool m_externalClipboardHasShapes = false;
     QStringList labelsForImage(const QString &path) const;
-    void rebuildFileLabelFilterMenu();
+    void rebuildFileLabelFilterMenu(bool reloadLabels = true);
+    QHash<QString, QStringList> m_fileLabels;
+    QSet<QString> m_annotatedFiles;
     void updateFileDockTitle();
     void refreshTopLevelFlagsList();
     QString contextFilePath() const;
@@ -374,6 +394,9 @@ private:
     QAction *m_deleteImageAction = nullptr;
     QAction *m_deleteAnnotationAction = nullptr;
     QAction *m_createModeAction = nullptr;
+    QAction *m_repeatCreateAction = nullptr;
+    QAction *m_lastCreateAction = nullptr;
+    QString m_lastCreateShapeType = QStringLiteral("rectangle");
     QAction *m_createPolygonModeAction = nullptr;
     QAction *m_createPointModeAction = nullptr;
     QAction *m_createPointsModeAction = nullptr;
@@ -499,6 +522,7 @@ private:
     double m_displayFps = 0.0;
     bool m_dirty = false;
     bool m_autoSavePending = false;
+    void scheduleAutoSave();
     bool m_configOverrides = false;
     bool m_verified = false;
     bool m_noSelectionSlot = false;

@@ -4,6 +4,7 @@
 #include <QApplication>
 #include <QByteArray>
 #include <QBuffer>
+#include <QCursor>
 #include <QElapsedTimer>
 #include <QEnterEvent>
 #include <QFocusEvent>
@@ -472,6 +473,7 @@ void drawMaskBoundary(QPainter &painter,
 }
 
 void Canvas::setPixmap(const QPixmap &pixmap) {
+    m_cachedOverview = {};
     m_pixmap = pixmap;
     m_imageSize = pixmap.size();
     m_promptPointLabels.clear();
@@ -495,6 +497,7 @@ void Canvas::setPixmap(const QPixmap &pixmap) {
 }
 
 void Canvas::setPreviewPixmap(const QPixmap &preview, const QSize &imageSize) {
+    m_cachedOverview = {};
     if (preview.isNull() || !imageSize.isValid() || imageSize.isEmpty()) {
         setPixmap(preview);
         return;
@@ -641,12 +644,17 @@ QImage Canvas::overviewImage(int maxSide) const {
     if (m_pixmap.isNull() || maxSide <= 0) {
         return {};
     }
+    if (!m_cachedOverview.isNull() && m_cachedOverviewMaxSide == maxSide) {
+        return m_cachedOverview;
+    }
     const QSize sourceSize = m_pixmap.size();
     const double scale = qMin(static_cast<double>(maxSide) / sourceSize.width(),
                               static_cast<double>(maxSide) / sourceSize.height());
     QSize targetSize(qMax(1, qRound(sourceSize.width() * scale)),
                      qMax(1, qRound(sourceSize.height() * scale)));
-    return m_pixmap.toImage().scaled(targetSize, Qt::KeepAspectRatio, Qt::FastTransformation);
+    m_cachedOverview = m_pixmap.toImage().scaled(targetSize, Qt::KeepAspectRatio, Qt::FastTransformation);
+    m_cachedOverviewMaxSide = maxSide;
+    return m_cachedOverview;
 }
 
 void Canvas::rebuildAdjustedImage() {
@@ -665,18 +673,19 @@ void Canvas::rebuildAdjustedImage() {
     // applied first, then contrast blends the result with a flat image whose
     // value is the whole-image grayscale mean. Keeping the intermediate
     // image also preserves the original alpha channel just like LabelMe.
-    const auto brightenChannel = [brightnessFactor](int channel) {
-        return qBound(0, static_cast<int>(std::floor(channel * brightnessFactor)), 255);
-    };
+    int brightnessLut[256];
+    for (int channel = 0; channel < 256; ++channel) {
+        brightnessLut[channel] = qBound(0, static_cast<int>(std::floor(channel * brightnessFactor)), 255);
+    }
 
     for (int y = 0; y < source.height(); ++y) {
         const QRgb *sourceLine = reinterpret_cast<const QRgb *>(source.constScanLine(y));
         QRgb *targetLine = reinterpret_cast<QRgb *>(m_adjustedImage.scanLine(y));
         for (int x = 0; x < source.width(); ++x) {
             const QRgb pixel = sourceLine[x];
-            targetLine[x] = qRgba(brightenChannel(qRed(pixel)),
-                                  brightenChannel(qGreen(pixel)),
-                                  brightenChannel(qBlue(pixel)),
+            targetLine[x] = qRgba(brightnessLut[qRed(pixel)],
+                                  brightnessLut[qGreen(pixel)],
+                                  brightnessLut[qBlue(pixel)],
                                   qAlpha(pixel));
         }
     }
@@ -695,17 +704,18 @@ void Canvas::rebuildAdjustedImage() {
         const double grayMean = pixelCount > 0
                                     ? std::floor(static_cast<double>(graySum / pixelCount) + 0.5)
                                     : 0.0;
+        int contrastLut[256];
+        for (int channel = 0; channel < 256; ++channel) {
+            const double blended = grayMean * (1.0 - contrastFactor) + channel * contrastFactor;
+            contrastLut[channel] = qBound(0, static_cast<int>(std::floor(blended)), 255);
+        }
         for (int y = 0; y < source.height(); ++y) {
             QRgb *line = reinterpret_cast<QRgb *>(m_adjustedImage.scanLine(y));
             for (int x = 0; x < source.width(); ++x) {
                 const QRgb pixel = line[x];
-                const auto contrastChannel = [grayMean, contrastFactor](int channel) {
-                    const double blended = grayMean * (1.0 - contrastFactor) + channel * contrastFactor;
-                    return qBound(0, static_cast<int>(std::floor(blended)), 255);
-                };
-                line[x] = qRgba(contrastChannel(qRed(pixel)),
-                                contrastChannel(qGreen(pixel)),
-                                contrastChannel(qBlue(pixel)),
+                line[x] = qRgba(contrastLut[qRed(pixel)],
+                                contrastLut[qGreen(pixel)],
+                                contrastLut[qBlue(pixel)],
                                 qAlpha(pixel));
             }
         }
@@ -924,6 +934,13 @@ QVector<int> Canvas::promptPointLabels() const {
     return m_promptPointLabels;
 }
 
+void Canvas::syncCrosshairPosition(const QPointF &widgetPos) {
+    m_hasHoverImagePos = !m_pixmap.isNull() && rect().contains(widgetPos.toPoint());
+    if (m_hasHoverImagePos) {
+        m_hoverImagePos = clampToPixmap(imagePos(widgetPos));
+    }
+}
+
 void Canvas::setCreateMode(bool enabled) {
     m_createMode = enabled;
     m_editing = !enabled;
@@ -943,6 +960,7 @@ void Canvas::setCreateMode(bool enabled) {
         }
         setSelectedIndices({});
         setCursor(Qt::CrossCursor);
+        syncCrosshairPosition(mapFromGlobal(QCursor::pos()));
     } else {
         unsetCursor();
     }
@@ -2204,6 +2222,7 @@ void Canvas::mouseMoveEvent(QMouseEvent *event) {
     QPoint currentGlobal = event->globalPosition().toPoint();
     const QPointF rawCurrentImagePos = imagePos(event->position());
     QPointF currentImagePos = clampToPixmap(rawCurrentImagePos);
+    const bool hoverPositionChanged = !m_hasHoverImagePos || m_hoverImagePos != currentImagePos;
     m_hoverImagePos = currentImagePos;
     m_hasHoverImagePos = true;
 
@@ -2471,6 +2490,9 @@ void Canvas::mouseMoveEvent(QMouseEvent *event) {
         if (m_createMode && !m_editing) {
             setCursor(Qt::CrossCursor);
             emit statusTextChanged(canvasPositionStatus(currentImagePos));
+            if (hoverPositionChanged && crosshairEnabledForShapeType(m_createShapeType)) {
+                update();
+            }
             return;
         }
         m_hoverShape = -1;
@@ -2696,6 +2718,8 @@ void Canvas::mouseReleaseEvent(QMouseEvent *event) {
 }
 
 void Canvas::enterEvent(QEnterEvent *event) {
+    syncCrosshairPosition(event->position());
+    if (m_createMode) update();
     if (m_createMode && !m_editing) {
         setCursor(Qt::CrossCursor);
     } else if (!m_editing) {
@@ -2770,7 +2794,9 @@ void Canvas::keyPressEvent(QKeyEvent *event) {
         return;
     }
     if (event->key() == Qt::Key_Escape) {
-        cancelDrawing();
+        setViewMode();
+        emit viewModeRequested();
+        event->accept();
         return;
     }
     if (event->modifiers() == Qt::ControlModifier && event->key() == Qt::Key_Z && undoLastDrawingPoint()) {

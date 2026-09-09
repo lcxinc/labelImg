@@ -28,7 +28,6 @@ MiniMapOverlay::MiniMapOverlay(Canvas *canvas, QScrollArea *scrollArea, QWidget 
     if (m_canvas) {
         connect(m_canvas, &Canvas::frameRendered, this, [this]() {
             refreshGeometry();
-            update();
         });
     }
     refreshGeometry();
@@ -36,7 +35,7 @@ MiniMapOverlay::MiniMapOverlay(Canvas *canvas, QScrollArea *scrollArea, QWidget 
 
 void MiniMapOverlay::setMiniMapEnabled(bool enabled) {
     m_enabled = enabled;
-    updateVisibility();
+    refreshGeometry();
 }
 
 bool MiniMapOverlay::miniMapEnabled() const {
@@ -44,12 +43,16 @@ bool MiniMapOverlay::miniMapEnabled() const {
 }
 
 void MiniMapOverlay::refreshGeometry() {
-    if (!m_canvas || !m_scrollArea || !parentWidget()) {
+    if (!m_enabled || !m_canvas || !m_scrollArea || !parentWidget()) {
         hide();
         return;
     }
 
-    m_overview = m_canvas->overviewImage(kMaxSide);
+    const QImage overview = m_canvas->overviewImage(kMaxSide);
+    const bool imageChanged = m_overview != overview;
+    if (imageChanged) {
+        m_overview = overview;
+    }
     if (m_overview.isNull()) {
         updateVisibility();
         return;
@@ -72,6 +75,22 @@ void MiniMapOverlay::refreshGeometry() {
         raise();
     }
     updateVisibility();
+
+    QVector<QRectF> shapeBounds;
+    const auto shapes = m_canvas->shapes();
+    for (const Shape &shape : shapes) {
+        if (shape.visible) shapeBounds.append(shape.boundingRect());
+    }
+    const QRectF viewportRect = viewportRectOnMiniMap();
+    // A transparent overlay also repaints the canvas underneath it. Scheduling
+    // another update on every frameRendered signal creates an endless loop.
+    // Only invalidate the overlay when something it actually displays changed.
+    if (imageChanged || geometryChanged || shapeBounds != m_shapeBounds ||
+        viewportRect != m_lastViewportRect) {
+        m_shapeBounds = shapeBounds;
+        m_lastViewportRect = viewportRect;
+        update();
+    }
 }
 
 bool MiniMapOverlay::eventFilter(QObject *watched, QEvent *event) {
@@ -211,8 +230,9 @@ void MiniMapOverlay::centerViewOnMiniMapPoint(const QPointF &point) {
 
 void MiniMapOverlay::updateVisibility() {
     const bool shouldShow = m_enabled && !m_overview.isNull();
+    const bool wasVisible = isVisible();
     setVisible(shouldShow);
-    if (shouldShow) {
+    if (shouldShow && !wasVisible) {
         raise();
     }
 }

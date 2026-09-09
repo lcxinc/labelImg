@@ -2,6 +2,10 @@
 #include <QtWidgets>
 
 #include <QBuffer>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <windowsx.h>
+#endif
 
 #include "core/AnnotationIO.h"
 #include "core/LabelMeConfig.h"
@@ -15,6 +19,10 @@ class UiTests : public QObject {
     Q_OBJECT
 
 private slots:
+    void performanceAudit();
+    void mainWindowThumbnailsLoadOnlyVisibleRowsAndRefreshAfterSave();
+    void mainWindowDrawingDoesNotReadClipboardRepeatedly();
+    void canvasOverviewUpdatesOnImageReplacement();
     void init();
     void canvasCreatesAndCancelsShapes();
     void canvasStartsInEditModeLikeLabelMe();
@@ -31,6 +39,7 @@ private slots:
     void canvasShiftCreatesLabelMeSquare();
     void canvasShiftResizesRectangleAsSquare();
     void canvasCreateModeCrosshairCanBeToggled();
+    void canvasCreateCrosshairRepaintsWhenMouseMovesWithoutButtons();
     void canvasCrosshairCanBeConfiguredPerCreateShape();
     void canvasDoubleClickCloseCanBeToggled();
     void canvasPointSizeCanBeConfigured();
@@ -151,6 +160,7 @@ private slots:
     void mainWindowDeletesCurrentAnnotationFileAndClearsShapes();
     void mainWindowCloseFileDisablesCanvasAndClearsActiveState();
     void mainWindowUsesFramelessChrome();
+    void mainWindowNativeResizeHitTargets();
     void mainWindowUsesGeneratedCppIcon();
     void mainWindowEmbedsToolbarIntoFramelessTitleBar();
     void mainWindowTitleToolAreaDoubleClickTogglesMaximize();
@@ -171,6 +181,7 @@ private slots:
     void mainWindowFileListTextsRefreshLanguage();
     void miniMapDrawsVisibleShapeBoxes();
     void miniMapIsSemiTransparentUntilHovered();
+    void miniMapDoesNotContinuouslyRepaintIdleCanvas();
     void mainWindowFpsUsesFrameCadenceNotRenderDuration();
     void mainWindowMiniMapClickChangesScrollbars();
     void mainWindowRestoresScrollPositionPerImage();
@@ -200,6 +211,7 @@ private slots:
     void mainWindowCtrlJIsViewModeAndVTogglesEditability();
     void mainWindowOnlyActiveCreateActionIsDisabled();
     void mainWindowPShortcutCreatesPolygonShape();
+    void mainWindowWRepeatsLastCreateMode();
     void mainWindowProvidesLabelMeCreateShortcuts();
     void mainWindowAppliesPersistedShortcutOverrides();
     void mainWindowBareShortcutsDoNotStealTextInput();
@@ -242,6 +254,7 @@ private slots:
     void mainWindowEditLabelDialogDefaultsToCurrentLabel();
     void mainWindowLabelEditDialogUsesCurrentLanguageForMetadataFields();
     void mainWindowBlankLabelKeepsEditDialogOpen();
+    void mainWindowSpaceConfirmsSelectedLabelAndPreservesTextSpaces();
     void mainWindowLabelEditArrowKeysNavigateLabelList();
     void mainWindowLabelEditCompleterAutocompletesPrefix();
     void mainWindowEditLabelDialogEditsLabelMeMetadata();
@@ -568,6 +581,14 @@ void UiTests::canvasCreatesAndCancelsShapes() {
     QTest::keyClick(&canvas, Qt::Key_Escape);
 
     QCOMPARE(canvas.shapes().size(), 1);
+    QVERIFY(!canvas.isDrawing());
+    QCOMPARE(canvas.cursor().shape(), Qt::ArrowCursor);
+    QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(80, 80));
+    QTest::mousePress(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(60, 60));
+    QTest::mouseMove(&canvas, QPoint(90, 90));
+    QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(90, 90));
+    QCOMPARE(canvas.shapes().size(), 1);
+    QCOMPARE(canvas.shapes().first().boundingRect().toRect(), QRect(10, 10, 40, 30));
 }
 
 void UiTests::canvasStartsInEditModeLikeLabelMe() {
@@ -899,6 +920,31 @@ void UiTests::canvasShiftResizesRectangleAsSquare() {
     QCOMPARE(canvas.shapes().first().groupId, 7);
     QCOMPARE(canvas.shapes().first().description, QStringLiteral("keep metadata"));
     QCOMPARE(canvas.shapes().first().flags.value(QStringLiteral("reviewed")), true);
+}
+
+void UiTests::canvasCreateCrosshairRepaintsWhenMouseMovesWithoutButtons() {
+    Canvas canvas;
+    QPixmap pixmap(200, 160);
+    pixmap.fill(Qt::black);
+    canvas.setPixmap(pixmap);
+    canvas.resize(200, 160);
+    canvas.setCreateMode(true);
+    canvas.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&canvas));
+    QTest::qWait(50);
+    QSignalSpy frames(&canvas, &Canvas::frameRendered);
+    const QPointF position(120, 90);
+    QMouseEvent move(QEvent::MouseMove, position, canvas.mapToGlobal(position.toPoint()),
+                     Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(&canvas, &move);
+    QTest::qWait(50);
+    QVERIFY2(frames.count() > 0, "Moving the crosshair must schedule a repaint without a mouse button press");
+    const QImage rendered = canvas.grab().toImage();
+    int linePixels = 0;
+    for (int y = 0; y < 70; ++y) {
+        if (qGray(rendered.pixel(120, y)) > 40) ++linePixels;
+    }
+    QVERIFY(linePixels > 20);
 }
 
 void UiTests::canvasCreateModeCrosshairCanBeToggled() {
@@ -4263,6 +4309,46 @@ void UiTests::mainWindowUsesFramelessChrome() {
     QVERIFY(window.menuWidget());
 }
 
+void UiTests::mainWindowNativeResizeHitTargets() {
+#ifdef Q_OS_WIN
+    if (QGuiApplication::platformName() != QStringLiteral("windows")) {
+        QSKIP("Requires native Windows hit testing");
+    }
+    resetTestSettings("native-resize-hit-targets");
+    MainWindow window;
+    window.move(80, 80);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    const HWND hwnd = reinterpret_cast<HWND>(window.winId());
+    QVERIFY(GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_THICKFRAME);
+    RECT frame;
+    QVERIFY(GetWindowRect(hwnd, &frame));
+    const int left = frame.left + 2, right = frame.right - 3;
+    const int top = frame.top + 2, bottom = frame.bottom - 3;
+    const int midX = (left + right) / 2, midY = (top + bottom) / 2;
+    const QList<QPair<QPoint, LRESULT>> targets = {
+        {{left, midY}, HTLEFT}, {{right, midY}, HTRIGHT},
+        {{midX, top}, HTTOP}, {{midX, bottom}, HTBOTTOM},
+        {{left, top}, HTTOPLEFT}, {{right, top}, HTTOPRIGHT},
+        {{left, bottom}, HTBOTTOMLEFT}, {{right, bottom}, HTBOTTOMRIGHT}};
+    for (const auto &target : targets) {
+        const LRESULT hit = SendMessageW(hwnd, WM_NCHITTEST, 0,
+                                        MAKELPARAM(target.first.x(), target.first.y()));
+        QCOMPARE(hit, target.second);
+    }
+    // Title-bar controls must remain clickable at the same DPI scale.
+    auto *closeButton = window.findChild<QToolButton *>("closeButton");
+    QVERIFY(closeButton);
+    const QPoint local = closeButton->mapTo(&window, closeButton->rect().center());
+    POINT native{qRound(local.x() * window.devicePixelRatioF()), qRound(local.y() * window.devicePixelRatioF())};
+    QVERIFY(ClientToScreen(hwnd, &native));
+    QCOMPARE(SendMessageW(hwnd, WM_NCHITTEST, 0, MAKELPARAM(native.x, native.y)), LRESULT(HTCLIENT));
+    qInfo() << "Native resize targets verified at scale" << window.devicePixelRatioF();
+#else
+    QSKIP("Windows only");
+#endif
+}
+
 void UiTests::mainWindowUsesGeneratedCppIcon() {
     resetTestSettings("generated-cpp-icon");
     MainWindow window;
@@ -4412,7 +4498,7 @@ void UiTests::mainWindowFooterContainsModeFormatAndMiniMapControls() {
     QVERIFY(toolBar);
     QAction *viewModeAction = window.findChild<QAction *>(QStringLiteral("viewModeAction"));
     QAction *editModeAction = window.findChild<QAction *>(QStringLiteral("editModeAction"));
-    QAction *createModeAction = actionByShortcut(&window, QKeySequence(QStringLiteral("W")));
+    QAction *createModeAction = window.findChild<QAction *>(QStringLiteral("createModeAction"));
     QAction *miniMapAction = window.findChild<QAction *>(QStringLiteral("miniMapAction"));
     QAction *formatAction = window.findChild<QAction *>(QStringLiteral("formatAction"));
     QToolButton *mainModeButton = window.findChild<QToolButton *>(QStringLiteral("mainModeButton"));
@@ -4504,7 +4590,7 @@ void UiTests::mainWindowFooterControlsRefreshLanguage() {
     QCOMPARE(editShortcut->text(), QStringLiteral("Edit"));
     QCOMPARE(editShortcut->toolTip(), QStringLiteral("Edit mode"));
     QCOMPARE(createShortcut->text(), QStringLiteral("W"));
-    QCOMPARE(createShortcut->toolTip(), QStringLiteral("Create box"));
+    QCOMPARE(createShortcut->toolTip(), QStringLiteral("Repeat the last creation tool; defaults to a rectangle"));
 
     simplifiedChinese->trigger();
     QCOMPARE(modeCombo->itemText(modeCombo->findData(QStringLiteral("view"))), QString::fromUtf8("查看 (V)"));
@@ -4514,7 +4600,7 @@ void UiTests::mainWindowFooterControlsRefreshLanguage() {
     QCOMPARE(editShortcut->text(), QString::fromUtf8("编辑"));
     QCOMPARE(editShortcut->toolTip(), QString::fromUtf8("编辑模式"));
     QCOMPARE(createShortcut->text(), QString::fromUtf8("W"));
-    QCOMPARE(createShortcut->toolTip(), QString::fromUtf8("新建框"));
+    QCOMPARE(createShortcut->toolTip(), QString::fromUtf8("重复上一次的创建方式；没有记录时创建矩形框"));
 }
 
 void UiTests::mainWindowHelpMenuIncludesTutorialAction() {
@@ -4875,6 +4961,23 @@ void UiTests::miniMapIsSemiTransparentUntilHovered() {
              qPrintable(hovered.pixelColor(hovered.rect().center()).name(QColor::HexArgb)));
 }
 
+void UiTests::miniMapDoesNotContinuouslyRepaintIdleCanvas() {
+    auto *canvas = new Canvas;
+    QPixmap pixmap(800, 600);
+    pixmap.fill(Qt::white);
+    canvas->setPixmap(pixmap);
+    QScrollArea scrollArea;
+    scrollArea.setWidget(canvas);
+    scrollArea.resize(500, 400);
+    MiniMapOverlay miniMap(canvas, &scrollArea, scrollArea.viewport());
+    scrollArea.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&scrollArea));
+    QTest::qWait(100);
+    QSignalSpy frames(canvas, &Canvas::frameRendered);
+    QTest::qWait(200);
+    QVERIFY2(frames.count() < 5, qPrintable(QStringLiteral("Idle canvas rendered %1 frames").arg(frames.count())));
+}
+
 void UiTests::mainWindowFpsUsesFrameCadenceNotRenderDuration() {
     resetTestSettings("fps-cadence");
     MainWindow window;
@@ -5108,8 +5211,11 @@ void UiTests::mainWindowViewMenuRestoresClosedRightDocks() {
     QVERIFY(showFileDockAction);
     QVERIFY(showLabelDockAction);
     QVERIFY(viewMenu);
-    QVERIFY(viewMenu->actions().contains(showFileDockAction));
-    QVERIFY(viewMenu->actions().contains(showLabelDockAction));
+    QMenu *panelsMenu = window.findChild<QMenu *>(QStringLiteral("menu_panelsLayout"));
+    QVERIFY(panelsMenu);
+    QVERIFY(viewMenu->actions().contains(panelsMenu->menuAction()));
+    QVERIFY(panelsMenu->actions().contains(showFileDockAction));
+    QVERIFY(panelsMenu->actions().contains(showLabelDockAction));
 
     fileDock->hide();
     labelDock->hide();
@@ -5431,9 +5537,7 @@ void UiTests::mainWindowCanvasContextMenuIncludesAllCreateModes() {
         QStringLiteral("createMaskModeAction")};
     QList<QAction *> expectedActions;
     for (const QString &name : actionNames) {
-        QAction *action = name == QStringLiteral("createModeAction")
-                              ? actionByShortcut(&window, QKeySequence(QStringLiteral("W")))
-                              : window.findChild<QAction *>(name);
+        QAction *action = window.findChild<QAction *>(name);
         QVERIFY(action);
         expectedActions.append(action);
     }
@@ -5536,13 +5640,15 @@ void UiTests::mainWindowFileThumbnailModeDefaultsOffAndCanToggle() {
     QCOMPARE(fileList->count(), 2);
     QVERIFY(fileList->item(0)->icon().isNull());
 
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
     thumbnailAction->trigger();
 
     QVERIFY(thumbnailAction->isChecked());
     QCOMPARE(fileList->viewMode(), QListView::ListMode);
     QCOMPARE(fileList->iconSize(), QSize(72, 54));
     QCOMPARE(fileList->count(), 2);
-    QVERIFY(!fileList->item(0)->icon().isNull());
+    QTRY_VERIFY(!fileList->item(0)->icon().isNull());
     QVERIFY(fileList->item(0)->sizeHint().height() >= 60);
     QCOMPARE(QFileInfo(fileList->item(0)->text()).fileName(), QString("a.jpg"));
 
@@ -5574,9 +5680,11 @@ void UiTests::mainWindowFileThumbnailsDrawAnnotationBoxes() {
     QVERIFY(fileList);
     QVERIFY(thumbnailAction);
 
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
     thumbnailAction->trigger();
     QCOMPARE(fileList->count(), 1);
-    QVERIFY(!fileList->item(0)->icon().isNull());
+    QTRY_VERIFY(!fileList->item(0)->icon().isNull());
     const QImage thumbnail = fileList->item(0)->icon().pixmap(fileList->iconSize()).toImage();
 
     QVERIFY2(countPreviewBoxPixels(thumbnail) > 8, "File thumbnail did not render annotation boxes");
@@ -5920,7 +6028,7 @@ void UiTests::mainWindowVShortcutSwitchesToViewMode() {
     QVERIFY(QTest::qWaitForWindowExposed(&window));
 
     QAction *viewModeAction = actionByShortcut(&window, QKeySequence(QStringLiteral("V")));
-    QAction *createModeAction = actionByShortcut(&window, QKeySequence(QStringLiteral("W")));
+    QAction *createModeAction = window.findChild<QAction *>(QStringLiteral("createModeAction"));
     QAction *editModeAction = window.findChild<QAction *>(QStringLiteral("editModeAction"));
     QVERIFY(viewModeAction);
     QVERIFY(createModeAction);
@@ -5962,7 +6070,7 @@ void UiTests::mainWindowCtrlJIsViewModeAndVTogglesEditability() {
     QAction *viewModeAction = actionByShortcut(&window, QKeySequence(QStringLiteral("V")));
     QAction *editabilityAction = window.findChild<QAction *>(QStringLiteral("editabilityAction"));
     QAction *editModeAction = window.findChild<QAction *>(QStringLiteral("editModeAction"));
-    QAction *createModeAction = actionByShortcut(&window, QKeySequence(QStringLiteral("W")));
+    QAction *createModeAction = window.findChild<QAction *>(QStringLiteral("createModeAction"));
     QComboBox *modeCombo = window.findChild<QComboBox *>(QStringLiteral("footerModeCombo"));
     Canvas *canvas = window.findChild<Canvas *>();
     QVERIFY(viewModeAction);
@@ -6052,6 +6160,80 @@ void UiTests::mainWindowOnlyActiveCreateActionIsDisabled() {
     for (QAction *action : actions) {
         QVERIFY(action->isEnabled());
     }
+}
+
+void UiTests::mainWindowWRepeatsLastCreateMode() {
+    resetTestSettings("repeat-create-shortcut");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QImage image(120, 100, QImage::Format_RGB32);
+    image.fill(Qt::white);
+    const QString path = dir.filePath("repeat.jpg");
+    QVERIFY(image.save(path));
+    MainWindow window;
+    window.loadStartupArgs({"labelImgCpp", path});
+    window.show();
+    window.activateWindow();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    auto *canvas = window.findChild<Canvas *>();
+    auto *repeat = window.findChild<QAction *>("repeatCreateAction");
+    auto *rectangle = window.findChild<QAction *>("createModeAction");
+    auto *polygon = window.findChild<QAction *>("createPolygonModeAction");
+    auto *edit = window.findChild<QAction *>("editModeAction");
+    auto *footer = window.findChild<QToolButton *>("footerCreateShortcut");
+    QVERIFY(canvas && repeat && rectangle && polygon && edit && footer);
+    canvas->setFocus();
+    QTest::keyClick(canvas, Qt::Key_W);
+    QVERIFY(rectangle->isChecked());
+    QCOMPARE(canvas->createShapeType(), QStringLiteral("rectangle"));
+
+    polygon->trigger();
+    acceptNextLabelPrompt(QStringLiteral("poly"));
+    QTest::mouseClick(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(10, 10));
+    QVERIFY(!repeat->isEnabled());
+    QTest::keyClick(canvas, Qt::Key_W);
+    QVERIFY(canvas->isDrawing());
+    QTest::mouseClick(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(80, 12));
+    QTest::mouseClick(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(70, 55));
+    QTest::keyClick(canvas, Qt::Key_Return);
+    QCOMPARE(canvas->shapes().size(), 1);
+    QVERIFY(edit->isChecked());
+    QVERIFY(repeat->isEnabled());
+    QVERIFY(!canvas->isDrawing());
+    window.activateWindow();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    canvas->setFocus();
+    QTest::keyClick(canvas, Qt::Key_W);
+    QVERIFY(polygon->isChecked());
+    QCOMPARE(canvas->createShapeType(), QStringLiteral("polygon"));
+    edit->trigger();
+    QTest::mouseClick(footer, Qt::LeftButton);
+    QVERIFY(polygon->isChecked());
+    canvas->setFocus();
+    QTest::keyClick(canvas, Qt::Key_R, Qt::ControlModifier);
+    QVERIFY(rectangle->isChecked());
+    edit->trigger();
+    QTest::keyClick(canvas, Qt::Key_W);
+    QVERIFY(rectangle->isChecked());
+    auto *view = window.findChild<QAction *>("viewModeAction");
+    QVERIFY(view);
+    QTest::keyClick(canvas, Qt::Key_Escape);
+    QVERIFY(view->isChecked());
+    QVERIFY(!rectangle->isChecked());
+    QVERIFY(!edit->isChecked());
+    QCOMPARE(canvas->cursor().shape(), Qt::ArrowCursor);
+
+    QTest::keyClick(canvas, Qt::Key_W);
+    QVERIFY(rectangle->isChecked());
+    QTest::mousePress(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(15, 15));
+    QTest::mouseMove(canvas, QPoint(45, 45));
+    QVERIFY(canvas->isDrawing());
+    QTest::keyClick(canvas, Qt::Key_Escape);
+    QVERIFY(view->isChecked());
+    QVERIFY(!canvas->isDrawing());
+    QCOMPARE(canvas->shapes().size(), 1);
+    QCOMPARE(canvas->shapes().first().shapeType, QStringLiteral("polygon"));
+    QTest::mouseRelease(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(45, 45));
 }
 
 void UiTests::mainWindowPShortcutCreatesPolygonShape() {
@@ -7759,6 +7941,65 @@ void UiTests::mainWindowLabelEditDialogUsesCurrentLanguageForMetadataFields() {
     QVERIFY(seen);
     QVERIFY(labels.contains(QStringLiteral("分组 ID")));
     QVERIFY(labels.contains(QStringLiteral("标签描述")));
+}
+
+void UiTests::mainWindowSpaceConfirmsSelectedLabelAndPreservesTextSpaces() {
+    resetTestSettings("label-space-confirm");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QImage image(100, 80, QImage::Format_RGB32);
+    image.fill(Qt::white);
+    const QString path = dir.filePath("space.jpg");
+    QVERIFY(image.save(path));
+    MainWindow window;
+    window.loadStartupArgs({"labelImgCpp", path});
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *canvas = window.findChild<Canvas *>();
+    auto *create = actionByShortcut(&window, QKeySequence("W"));
+    auto *edit = actionByShortcut(&window, QKeySequence("Ctrl+E"));
+    QVERIFY(canvas && create && edit);
+    acceptNextLabelPrompt(QStringLiteral("defect"));
+    create->trigger();
+    QTest::mousePress(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(10, 10));
+    QTest::mouseMove(canvas, QPoint(40, 35));
+    QTest::mouseRelease(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(40, 35));
+    QCOMPARE(canvas->shapes().size(), 1);
+
+    bool confirmed = false;
+    QTimer::singleShot(0, &window, [&]() {
+        auto *dialog = window.findChild<QDialog *>("labelEditDialog");
+        QVERIFY(dialog);
+        auto *combo = dialog->findChild<QComboBox *>("labelEditCombo");
+        QVERIFY(combo && combo->lineEdit());
+        QCOMPARE(combo->lineEdit()->selectedText(), QStringLiteral("defect"));
+        QTest::keyClick(combo->lineEdit(), Qt::Key_Space);
+        confirmed = dialog->result() == QDialog::Accepted && !dialog->isVisible();
+        if (dialog->isVisible()) dialog->reject();
+    });
+    edit->trigger();
+    QVERIFY(confirmed);
+    QCOMPARE(canvas->shapes().first().label, QStringLiteral("defect"));
+
+    bool textSpacesPreserved = false;
+    QTimer::singleShot(0, &window, [&]() {
+        auto *dialog = window.findChild<QDialog *>("labelEditDialog");
+        QVERIFY(dialog);
+        auto *combo = dialog->findChild<QComboBox *>("labelEditCombo");
+        auto *description = dialog->findChild<QPlainTextEdit *>("labelDescriptionEdit");
+        QVERIFY(combo && description);
+        auto *editor = combo->lineEdit();
+        editor->setText("tire");
+        editor->setCursorPosition(4);
+        QTest::keyClick(editor, Qt::Key_Space);
+        description->setFocus();
+        QTest::keyClicks(description, "one defect");
+        textSpacesPreserved = dialog->isVisible() && editor->text() == "tire " &&
+                              description->toPlainText() == "one defect";
+        dialog->reject();
+    });
+    edit->trigger();
+    QVERIFY(textSpacesPreserved);
 }
 
 void UiTests::mainWindowBlankLabelKeepsEditDialogOpen() {
@@ -10367,15 +10608,24 @@ void UiTests::mainWindowAutoSaveWritesDuringEditing() {
     QVERIFY(createModeAction);
     QVERIFY(autoSaveAction);
     autoSaveAction->setChecked(true);
+    auto *fileList = window.findChild<QListWidget *>(QStringLiteral("fileList"));
+    QVERIFY(fileList);
+    QVERIFY(fileList->count() > 0);
+    QSignalSpy listResets(fileList->model(), &QAbstractItemModel::modelReset);
 
     acceptNextLabelPrompt(QStringLiteral("defect"));
     createModeAction->trigger();
     QTest::mousePress(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(10, 10));
     QTest::mouseMove(canvas, QPoint(40, 35));
+    QTest::qWait(350);
+    QVERIFY2(!QFileInfo::exists(dir.filePath(QStringLiteral("auto.xml"))),
+             "Auto-save must wait until the drawing gesture is complete");
     QTest::mouseRelease(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(40, 35));
 
     QTRY_VERIFY2(QFileInfo::exists(dir.filePath(QStringLiteral("auto.xml"))),
                  qPrintable(QStringLiteral("files=%1").arg(QDir(dir.path()).entryList(QDir::Files).join(','))));
+    QCOMPARE(listResets.count(), 0);
+    QCOMPARE(fileList->item(0)->checkState(), Qt::Checked);
 }
 
 void UiTests::mainWindowStatusBarShowsLoadedImageMessage() {
@@ -11113,7 +11363,8 @@ void UiTests::mainWindowAppliesLabelMeShortcutConfig() {
     QVERIFY(copyAction);
     QVERIFY(quitAction);
     QCOMPARE(quitAction->objectName(), QStringLiteral("quitAction"));
-    QVERIFY(!actionByShortcut(&window, QKeySequence(QStringLiteral("W"))));
+    QCOMPARE(actionByShortcut(&window, QKeySequence(QStringLiteral("W")))->objectName(),
+             QStringLiteral("repeatCreateAction"));
 }
 
 void UiTests::mainWindowAppliesLabelMeLabelDialogConfig() {
@@ -11943,6 +12194,83 @@ void UiTests::mainWindowLabelFilterOnlyTogglesShapeVisibility() {
     QVERIFY(canvas->shapes().at(0).visible);
     QVERIFY(!canvas->shapes().at(1).visible);
     QCOMPARE(filterCombo->currentText(), QString("keep"));
+}
+
+#include "performance_audit.inc"
+
+void UiTests::canvasOverviewUpdatesOnImageReplacement() {
+    Canvas canvas;
+    QPixmap image(800, 600);
+    image.fill(Qt::red);
+    canvas.setPixmap(image);
+    const QImage redOverview = canvas.overviewImage(200);
+    QCOMPARE(redOverview.pixelColor(10, 10), QColor(Qt::red));
+    QCOMPARE(canvas.overviewImage(200), redOverview);
+    image.fill(Qt::blue);
+    canvas.setPreviewPixmap(image, QSize(4000, 3000));
+    QCOMPARE(canvas.overviewImage(200).pixelColor(10, 10), QColor(Qt::blue));
+    QCOMPARE(canvas.overviewImage(100).size(), QSize(100, 75));
+    canvas.setPixmap(QPixmap());
+    QVERIFY(canvas.overviewImage(200).isNull());
+}
+
+void UiTests::mainWindowThumbnailsLoadOnlyVisibleRowsAndRefreshAfterSave() {
+    resetTestSettings("visible-thumbnails");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QImage image(80, 60, QImage::Format_RGB32);
+    image.fill(Qt::white);
+    for (int i = 0; i < 100; ++i) {
+        QVERIFY(image.save(dir.filePath(QStringLiteral("image_%1.jpg").arg(i, 3, 10, QLatin1Char('0')))));
+    }
+    MainWindow window;
+    window.loadStartupArgs({"labelImgCpp", dir.path()});
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *files = window.findChild<QListWidget *>("fileList");
+    auto *canvas = window.findChild<Canvas *>();
+    auto *thumbnails = window.findChild<QAction *>("thumbnailModeAction");
+    QVERIFY(files && canvas && thumbnails);
+    thumbnails->trigger();
+    QTRY_VERIFY(!files->item(0)->icon().isNull());
+    QVERIFY(files->item(99)->icon().isNull());
+    QCOMPARE(countPreviewBoxPixels(files->item(0)->icon().pixmap(72, 54).toImage()), 0);
+    canvas->setShapes({Shape::fromRect("defect", QRectF(20, 15, 30, 20), false)});
+    QVERIFY(QMetaObject::invokeMethod(&window, "onCanvasShapesChanged"));
+    QVERIFY(QMetaObject::invokeMethod(&window, "saveFile"));
+    QTRY_VERIFY(countPreviewBoxPixels(files->item(0)->icon().pixmap(72, 54).toImage()) > 8);
+    files->scrollToBottom();
+    QTRY_VERIFY(!files->item(99)->icon().isNull());
+    // Rebuild the list while a decoder may still be in flight. Old row pointers
+    // and old-generation results must never leak into a newly filtered list.
+    window.findChild<QLineEdit *>("fileSearchEdit")->setText("image_099");
+    QCOMPARE(files->count(), 1);
+    QTRY_VERIFY(!files->item(0)->icon().isNull());
+    QCOMPARE(QFileInfo(files->item(0)->text()).fileName(), QString("image_099.jpg"));
+}
+
+void UiTests::mainWindowDrawingDoesNotReadClipboardRepeatedly() {
+    class CountingMimeData final : public QMimeData {
+    public:
+        mutable int reads = 0;
+        QStringList formats() const override { return {"text/plain"}; }
+    protected:
+        QVariant retrieveData(const QString &, QMetaType) const override {
+            ++reads;
+            return QStringLiteral("[]");
+        }
+    };
+    resetTestSettings("clipboard-motion-cost");
+    MainWindow window;
+    auto *mime = new CountingMimeData;
+    QApplication::clipboard()->setMimeData(mime);
+    QCoreApplication::processEvents();
+    mime->reads = 0;
+    for (int i = 0; i < 100; ++i) {
+        QVERIFY(QMetaObject::invokeMethod(&window, "onCanvasSelectionChanged", Q_ARG(int, -1)));
+    }
+    QCOMPARE(mime->reads, 0);
+    QApplication::clipboard()->clear();
 }
 
 QTEST_MAIN(UiTests)
