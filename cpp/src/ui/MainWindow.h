@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/AnnotationIO.h"
+#include "core/YoloDataset.h"
 #include "core/AiAssistSession.h"
 #include "core/LabelMeConfig.h"
 #include "core/PerformanceMonitor.h"
@@ -46,6 +47,7 @@ public:
     explicit MainWindow(QWidget *parent = nullptr, const QString &defaultConfigPath = QString());
     void loadStartupArgs(const QStringList &arguments);
     bool openPath(const QString &path);
+    bool openYoloDataset(const QString &path);
     bool openAnnotation(const QString &path);
 
 protected:
@@ -63,6 +65,7 @@ protected:
 private slots:
     void openFile();
     void openDir();
+    void openYoloDatasetDialog();
     void openAnnotationDialog();
     void openCurrentImageWithViewer();
     void revealCurrentImageInFolder();
@@ -164,6 +167,7 @@ private:
     enum class SaveFormat { PascalVoc, Yolo, CreateMl, LabelMe };
 
     void createUi();
+    void openOnnxDetection();
     void createActions();
     void initializeShortcutRegistry();
     void registerShortcutCommand(const QString &commandId, const QString &category,
@@ -199,14 +203,16 @@ private:
     static AnnotationDocument readAnnotationForImage(const QString &imagePath, const QSize &imageSize,
                                                       const QString &saveDir, const QString &outputFilePath,
                                                       SaveFormat format, SaveFormat *detectedFormat = nullptr,
-                                                      QString *errorMessage = nullptr, bool previewOnly = false);
+                                                      QString *errorMessage = nullptr, bool previewOnly = false,
+                                                      const YoloDataset &dataset = {});
     static QImage readFileThumbnail(const QString &path, const QString &saveDir,
-                                    const QString &outputFilePath, SaveFormat format);
+                                    const QString &outputFilePath, SaveFormat format, const YoloDataset &dataset = {});
     void loadAnnotationsForCurrentImage(QString *errorMessage = nullptr);
     void refreshLabels();
     void refreshUniqueLabelList();
     void syncShapeOrderFromLabelList();
     void populateFileList(bool reloadMetadata = true);
+    void reloadImageQueue();
     void refreshSavedFileItem();
     void loadVisibleFileThumbnails();
     QThreadPool m_thumbnailPool;
@@ -226,6 +232,7 @@ private:
     void updateFileContextActions();
     void refreshFileListSelection();
     void scrollLabelListToCurrentShape();
+    void scrollCanvasToCurrentShape();
     void refreshTexts();
     void refreshActionToolTips();
     void assignActionIcons();
@@ -237,6 +244,7 @@ private:
     void addRecentDir(const QString &path);
     void loadRecentFile(const QString &path);
     void loadRecentDir(const QString &path);
+    bool openDirectory(const QString &path);
     QString preferredImageForCurrentDir() const;
     QString preferredNewShapeLabel() const;
     QColor colorForLabel(const QString &label) const;
@@ -337,6 +345,9 @@ private:
     QWidget *m_titleToolContainer = nullptr;
 
     QMenu *m_fileMenu = nullptr;
+    QAction *m_onnxDetectionAction = nullptr;
+    QMenu *m_openMoreMenu = nullptr;
+    QAction *m_openYoloDatasetAction = nullptr;
     QMenu *m_viewMenu = nullptr;
     QMenu *m_helpMenu = nullptr;
     QMenu *m_languageMenu = nullptr;
@@ -493,6 +504,9 @@ private:
     QString m_validateLabelPolicy;
     QString m_dirPath;
     QString m_saveDir;
+    YoloDataset m_yoloDataset;
+    QStringList m_classesBeforeDataset;
+    void leaveYoloDataset();
     // LabelMe's --output accepts a .json path for a single fixed annotation
     // file; keep it separate from the directory-based save setting.
     QString m_outputFilePath;

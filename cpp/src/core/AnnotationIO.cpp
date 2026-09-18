@@ -14,6 +14,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <QRegularExpression>
 #include <QStringConverter>
 #include <QTextStream>
 
@@ -142,8 +143,18 @@ bool AnnotationIO::loadPascalVoc(const QString &path, AnnotationDocument *docume
     return true;
 }
 
-bool AnnotationIO::saveYolo(const QString &path, const AnnotationDocument &document, QStringList classList) {
-    QFile file(path);
+bool AnnotationIO::saveYolo(const QString &path, const AnnotationDocument &document, QStringList classList, bool writeClasses) {
+    if (document.imageSize.isEmpty()) return false;
+    for (const Shape &shape : document.shapes) {
+        if (!writeClasses && (!classList.contains(shape.label) || shape.shapeType != "rectangle")) return false;
+        const QRectF rect = shape.boundingRect();
+        if (!std::isfinite(rect.x()) || !std::isfinite(rect.y()) ||
+            !std::isfinite(rect.width()) || !std::isfinite(rect.height()) ||
+            rect.width() <= 0 || rect.height() <= 0 || rect.left() < -0.01 || rect.top() < -0.01 ||
+            rect.right() > document.imageSize.width() + 0.01 ||
+            rect.bottom() > document.imageSize.height() + 0.01) return false;
+    }
+    QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         return false;
     }
@@ -167,6 +178,10 @@ bool AnnotationIO::saveYolo(const QString &path, const AnnotationDocument &docum
                << QString::number(height, 'f', 6) << '\n';
     }
 
+    stream.flush();
+    if (stream.status() != QTextStream::Ok) return false;
+    if (!writeClasses) return file.commit();
+
     QFile classFile(QFileInfo(path).dir().filePath("classes.txt"));
     if (!classFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
         return false;
@@ -176,7 +191,8 @@ bool AnnotationIO::saveYolo(const QString &path, const AnnotationDocument &docum
     for (const QString &className : classList) {
         classStream << className << '\n';
     }
-    return true;
+    classStream.flush();
+    return classStream.status() == QTextStream::Ok && file.commit();
 }
 
 bool AnnotationIO::loadYolo(const QString &path, const QSize &imageSize, AnnotationDocument *document, const QString &classListPath) {
@@ -184,31 +200,47 @@ bool AnnotationIO::loadYolo(const QString &path, const QSize &imageSize, Annotat
         return false;
     }
     QFile classFile(classListPath.isEmpty() ? QFileInfo(path).dir().filePath("classes.txt") : classListPath);
-    QFile file(path);
-    if (!classFile.open(QIODevice::ReadOnly | QIODevice::Text) || !file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        return false;
+    if (!classFile.open(QIODevice::ReadOnly | QIODevice::Text)) return false;
+    QStringList classes;
+    while (!classFile.atEnd()) {
+        const QString name = QString::fromUtf8(classFile.readLine()).trimmed();
+        if (!name.isEmpty()) classes.append(name);
     }
+    return loadYoloWithClasses(path, imageSize, document, classes);
+}
 
-    QStringList classes = QString::fromUtf8(classFile.readAll()).split('\n', Qt::SkipEmptyParts);
-    document->imageSize = imageSize;
-    document->shapes.clear();
+bool AnnotationIO::loadYoloWithClasses(const QString &path, const QSize &imageSize,
+                                      AnnotationDocument *document, const QStringList &classes) {
+    if (!document || imageSize.isEmpty() || classes.isEmpty()) return false;
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return false;
+    QVector<Shape> shapes;
     QTextStream stream(&file);
     while (!stream.atEnd()) {
-        QStringList parts = stream.readLine().split(' ', Qt::SkipEmptyParts);
-        if (parts.size() != 5) {
-            continue;
+        const QString line = stream.readLine().trimmed();
+        if (line.isEmpty()) continue;
+        const QStringList parts = line.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+        // Reject unsupported segmentation/pose data rather than overwriting it
+        // with an empty detection annotation on the next save.
+        if (parts.size() != 5) return false;
+        bool ok = false;
+        const int classIndex = parts[0].toInt(&ok);
+        if (!ok || classIndex < 0 || classIndex >= classes.size()) return false;
+        double coords[4];
+        for (int i = 0; i < 4; ++i) {
+            coords[i] = parts[i + 1].toDouble(&ok);
+            if (!ok || !std::isfinite(coords[i]) || coords[i] < 0 || coords[i] > 1) return false;
         }
-        int classIndex = parts[0].toInt();
-        double xCenter = parts[1].toDouble();
-        double yCenter = parts[2].toDouble();
-        double width = parts[3].toDouble();
-        double height = parts[4].toDouble();
-        QRectF rect((xCenter - width / 2.0) * imageSize.width(),
-                    (yCenter - height / 2.0) * imageSize.height(),
-                    width * imageSize.width(),
-                    height * imageSize.height());
-        document->shapes.push_back(Shape::fromRect(classes.value(classIndex), rect, false));
+        const double x = coords[0], y = coords[1], w = coords[2], h = coords[3];
+        if (w <= 0 || h <= 0 || x - w / 2 < -0.000002 || y - h / 2 < -0.000002 ||
+            x + w / 2 > 1.000002 || y + h / 2 > 1.000002) return false;
+        QRectF rect((x - w / 2) * imageSize.width(), (y - h / 2) * imageSize.height(),
+                    w * imageSize.width(), h * imageSize.height());
+        shapes.push_back(Shape::fromRect(classes[classIndex], rect, false));
     }
+    if (stream.status() != QTextStream::Ok) return false;
+    document->imageSize = imageSize;
+    document->shapes = shapes;
     return true;
 }
 

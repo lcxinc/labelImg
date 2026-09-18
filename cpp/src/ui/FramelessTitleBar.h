@@ -30,7 +30,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent *event) override;
 
 private:
-    QToolButton *createButton(const QString &text, const QString &toolTip, const QString &objectName) const;
+    QToolButton *createButton(const QString &toolTip, const QString &objectName) const;
     void installToolWidgetEventFilter(QWidget *widget);
 
     QHBoxLayout *m_layout = nullptr;

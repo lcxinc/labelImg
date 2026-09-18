@@ -7,9 +7,33 @@
 #include <QLabel>
 #include <QMenuBar>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QStyle>
 #include <QToolBar>
 #include <QToolButton>
+
+namespace {
+QIcon windowControlIcon(const QString &control) {
+    QPixmap bitmap(32, 32);
+    bitmap.setDevicePixelRatio(2);
+    bitmap.fill(Qt::transparent);
+    QPainter painter(&bitmap);
+    painter.setPen(QPen(QColor(QStringLiteral("#17212b")), 1.2));
+    if (control == QStringLiteral("minimizeButton")) {
+        painter.drawLine(QPointF(3, 8), QPointF(13, 8));
+    } else if (control == QStringLiteral("closeButton")) {
+        painter.drawLine(QPointF(3, 3), QPointF(13, 13));
+        painter.drawLine(QPointF(13, 3), QPointF(3, 13));
+    } else if (control == QStringLiteral("restore")) {
+        painter.drawRect(QRectF(5, 3, 8, 8));
+        painter.fillRect(QRectF(3, 5, 8, 8), QColor(QStringLiteral("#eef8e8")));
+        painter.drawRect(QRectF(3, 5, 8, 8));
+    } else {
+        painter.drawRect(QRectF(3, 3, 10, 10));
+    }
+    return QIcon(bitmap);
+}
+}
 
 FramelessTitleBar::FramelessTitleBar(QWidget *parent)
     : QFrame(parent) {
@@ -30,9 +54,9 @@ FramelessTitleBar::FramelessTitleBar(QWidget *parent)
     m_titleLabel->setMaximumWidth(280);
     m_titleLabel->setTextInteractionFlags(Qt::NoTextInteraction);
 
-    auto *minimizeButton = createButton(QString(QChar(0x2212)), QStringLiteral("Minimize"), QStringLiteral("minimizeButton"));
-    m_maximizeButton = createButton(QString(QChar(0x25a1)), QStringLiteral("Maximize"), QStringLiteral("maximizeButton"));
-    auto *closeButton = createButton(QString(QChar(0x00d7)), QStringLiteral("Close"), QStringLiteral("closeButton"));
+    auto *minimizeButton = createButton(QStringLiteral("Minimize"), QStringLiteral("minimizeButton"));
+    m_maximizeButton = createButton(QStringLiteral("Maximize"), QStringLiteral("maximizeButton"));
+    auto *closeButton = createButton(QStringLiteral("Close"), QStringLiteral("closeButton"));
 
     connect(minimizeButton, &QToolButton::clicked, this, &FramelessTitleBar::minimizeRequested);
     connect(m_maximizeButton, &QToolButton::clicked, this, &FramelessTitleBar::maximizeRestoreRequested);
@@ -86,8 +110,9 @@ void FramelessTitleBar::setTitle(const QString &title) {
 }
 
 void FramelessTitleBar::setMaximized(bool maximized) {
-    m_maximizeButton->setText(maximized ? QString(QChar(0x2750)) : QString(QChar(0x25a1)));
+    m_maximizeButton->setIcon(windowControlIcon(maximized ? QStringLiteral("restore") : QStringLiteral("maximizeButton")));
     m_maximizeButton->setToolTip(maximized ? QStringLiteral("Restore") : QStringLiteral("Maximize"));
+    m_maximizeButton->setAccessibleName(m_maximizeButton->toolTip());
 }
 
 void FramelessTitleBar::setToolWidget(QWidget *widget) {
@@ -172,10 +197,12 @@ void FramelessTitleBar::installToolWidgetEventFilter(QWidget *widget) {
     }
 }
 
-QToolButton *FramelessTitleBar::createButton(const QString &text, const QString &toolTip, const QString &objectName) const {
+QToolButton *FramelessTitleBar::createButton(const QString &toolTip, const QString &objectName) const {
     auto *button = new QToolButton(const_cast<FramelessTitleBar *>(this));
     button->setObjectName(objectName);
-    button->setText(text);
+    button->setAccessibleName(toolTip);
+    button->setIcon(windowControlIcon(objectName));
+    button->setIconSize(QSize(16, 16));
     button->setToolTip(toolTip);
     button->setCursor(Qt::ArrowCursor);
     button->setFocusPolicy(Qt::NoFocus);

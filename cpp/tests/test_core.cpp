@@ -12,6 +12,7 @@
 #include <cstring>
 
 #include "core/AnnotationIO.h"
+#include "core/YoloDataset.h"
 #include "core/AiAssistBridge.h"
 #include "core/AiAssistSession.h"
 #include "core/LabelListModel.h"
@@ -29,6 +30,9 @@ private slots:
     void stringBundleNormalizesLocales();
     void pascalVocRoundTripsChineseLabels();
     void yoloWritesClassesInEncounterOrder();
+    void yoloDatasetReadsClassFormsAndMapsPaths();
+    void yoloDatasetRejectsInvalidLabelsWithoutOverwriting();
+    void yoloDatasetExternalReadOnlyAudit();
     void createMlUpdatesExistingImageEntry();
     void createMlRejectsMalformedJson();
     void labelMeRoundTripsRectangleJson();
@@ -3222,6 +3226,12 @@ void CoreTests::labelMeImageDataUsesTiffFallbackForMultibandInput() {
 }
 
 void CoreTests::resourcePathsFindSharedAssets() {
+    QVERIFY(ResourcePaths::filePath("resources/strings").startsWith(":/labelimg/"));
+    QVERIFY(ResourcePaths::filePath("resources/icons/app-cpp.png").startsWith(":/labelimg/"));
+    QVERIFY(!QImage(ResourcePaths::filePath("resources/icons/app-cpp.png")).isNull());
+    QFile chinese(ResourcePaths::filePath("resources/strings/strings-zh-CN.properties"));
+    QVERIFY(chinese.open(QIODevice::ReadOnly));
+    QVERIFY(chinese.readAll().contains(QString::fromUtf8("文件").toUtf8()));
     QVERIFY(QFileInfo::exists(ResourcePaths::filePath(QStringLiteral("resources/strings/strings.properties"))));
     QVERIFY(QFileInfo::exists(ResourcePaths::filePath(QStringLiteral("data/predefined_classes.txt"))));
 }
@@ -3457,3 +3467,97 @@ void CoreTests::aiAssistSessionReportsProgressEvents() {
 
 QTEST_MAIN(CoreTests)
 #include "test_core.moc"
+
+void CoreTests::yoloDatasetReadsClassFormsAndMapsPaths() {
+    QTemporaryDir dir;
+    QVERIFY(QDir().mkpath(dir.filePath("images/train/cam01")));
+    const QList<QByteArray> forms = {
+        "names: [defect, normal]\n",
+        "names:\n  - defect\n  - normal\n",
+        "names:\n  1: normal\n  0: defect\n",
+        "names: {1: normal, 0: defect}\n"
+    };
+    for (const QByteArray &form : forms) {
+        QFile config(dir.filePath("data.yaml"));
+        QVERIFY(config.open(QIODevice::WriteOnly));
+        config.write("path: Z:/stale-dataset\ntrain: train-selected.txt\n");
+        config.write(form);
+        config.close();
+        YoloDataset dataset;
+        QString error;
+        QVERIFY2(YoloDataset::load(dir.path(), &dataset, &error), qPrintable(error));
+        QCOMPARE(dataset.classes, QStringList({"defect", "normal"}));
+        QCOMPARE(dataset.annotationPath(dir.filePath("images/train/cam01/a.b.jpg")),
+                 dir.filePath("labels/train/cam01/a.b.txt"));
+        QVERIFY(dataset.annotationPath(dir.filePath("outside.jpg")).isEmpty());
+    }
+    QFile config(dir.filePath("data.yaml"));
+    QVERIFY(config.open(QIODevice::WriteOnly));
+    config.write("names: {0: defect, 2: normal}\n");
+    config.close();
+    YoloDataset dataset;
+    QString error;
+    QVERIFY(!YoloDataset::load(dir.path(), &dataset, &error));
+    QVERIFY(!dataset.isOpen());
+    QVERIFY(config.open(QIODevice::WriteOnly));
+    config.write("names: [defect, '', normal]\n");
+    config.close();
+    QVERIFY(!YoloDataset::load(dir.path(), &dataset, &error));
+}
+
+void CoreTests::yoloDatasetRejectsInvalidLabelsWithoutOverwriting() {
+    QTemporaryDir dir;
+    const QString path = dir.filePath("a.txt");
+    const QStringList classes{"defect", "normal"};
+    AnnotationDocument doc;
+    const QList<QByteArray> invalid = {
+        "2 0.5 0.5 0.2 0.2\n", "0 NaN 0.5 0.2 0.2\n",
+        "bad 0.5 0.5 0.2 0.2\n", "0 0.5 0.5 0.2 0.2 0.1 0.1\n",
+        "0 0.1 0.1 0.9 0.9\n"
+    };
+    for (const QByteArray &line : invalid) {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write(line);
+        file.close();
+        QVERIFY(!AnnotationIO::loadYoloWithClasses(path, QSize(100, 80), &doc, classes));
+    }
+    doc.imageSize = QSize(100, 80);
+    doc.shapes = {Shape::fromRect("normal", QRectF(20, 10, 40, 30), false)};
+    QVERIFY(AnnotationIO::saveYolo(path, doc, classes, false));
+    QVERIFY(!QFileInfo::exists(dir.filePath("classes.txt")));
+    AnnotationDocument loaded;
+    QVERIFY(AnnotationIO::loadYoloWithClasses(path, doc.imageSize, &loaded, classes));
+    QCOMPARE(loaded.shapes.first().label, QString("normal"));
+    QCOMPARE(loaded.shapes.first().boundingRect(), doc.shapes.first().boundingRect());
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const QByteArray original = file.readAll();
+    file.close();
+    doc.shapes.first().label = "unknown";
+    QVERIFY(!AnnotationIO::saveYolo(path, doc, classes, false));
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    QCOMPARE(file.readAll(), original);
+}
+
+void CoreTests::yoloDatasetExternalReadOnlyAudit() {
+    const QString root = qEnvironmentVariable("LABELIMG_TEST_YOLO_DATASET");
+    if (root.isEmpty()) QSKIP("Set LABELIMG_TEST_YOLO_DATASET for a read-only dataset audit");
+    YoloDataset dataset;
+    QString error;
+    QVERIFY2(YoloDataset::load(root, &dataset, &error), qPrintable(error));
+    int images = 0, boxes = 0, empty = 0;
+    QDirIterator it(QDir(dataset.root).filePath("images"), {"*.jpg", "*.png", "*.jpeg", "*.bmp"},
+                    QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString label = dataset.annotationPath(it.next());
+        QVERIFY2(QFileInfo::exists(label), qPrintable(label));
+        AnnotationDocument doc;
+        QVERIFY2(AnnotationIO::loadYoloWithClasses(label, QSize(1024, 1024), &doc, dataset.classes), qPrintable(label));
+        ++images;
+        boxes += doc.shapes.size();
+        if (doc.shapes.isEmpty()) ++empty;
+    }
+    QVERIFY(images > 0);
+    qInfo() << "Read-only YOLO audit: images" << images << "boxes" << boxes << "empty" << empty;
+}

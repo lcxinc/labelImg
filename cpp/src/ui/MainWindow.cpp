@@ -4,6 +4,8 @@
 #include "core/AiAssistBridge.h"
 #include "core/ImageIO.h"
 #include "ui/ShortcutCaptureEdit.h"
+#include "ui/OnnxDetectionDialog.h"
+#include <QTemporaryDir>
 
 #include <QAbstractButton>
 #include <QApplication>
@@ -1139,18 +1141,19 @@ void MainWindow::loadStartupArgs(const QStringList &arguments) {
         }
         QFileInfo startupInfo(positional.at(1));
         if (startupInfo.isDir()) {
-            m_dirPath = startupInfo.absoluteFilePath();
-            m_settings.setValue("lastOpenDir", m_dirPath);
-            m_imageList = scanImages(m_dirPath);
-            populateFileList();
-            m_currentImageIndex = 0;
-            addRecentDir(m_dirPath);
-            const QString preferred = preferredImageForCurrentDir();
-            if (!preferred.isEmpty()) loadImage(preferred);
+            openDirectory(startupInfo.absoluteFilePath());
         } else {
             openPath(startupInfo.absoluteFilePath());
         }
     } else {
+        const QString datasetConfig = m_settings.value("activeYoloDatasetConfig").toString();
+        if (!datasetConfig.isEmpty() && QFileInfo::exists(datasetConfig)) {
+            const QString lastDatasetImage = m_settings.value("activeYoloDatasetImage").toString();
+            if (openYoloDataset(datasetConfig)) {
+                if (m_imageList.contains(lastDatasetImage) && lastDatasetImage != m_filePath) loadImage(lastDatasetImage);
+                return;
+            }
+        }
         QString lastFile = m_settings.value("filename").toString();
         if (!lastFile.isEmpty() && QFileInfo::exists(lastFile)) {
             loadImage(lastFile);
@@ -1756,6 +1759,8 @@ void MainWindow::createUi() {
 void MainWindow::createActions() {
     m_openAction = new QAction(this);
     m_openAction->setShortcut(QKeySequence::Open);
+    m_openYoloDatasetAction = new QAction(this);
+    m_openYoloDatasetAction->setObjectName(QStringLiteral("openYoloDatasetAction"));
     m_openDirAction = new QAction(this);
     m_openDirAction->setShortcut(QKeySequence("Ctrl+U"));
     m_openAnnotationAction = new QAction(this);
@@ -2212,7 +2217,14 @@ void MainWindow::applyShortcutRegistry() {
 void MainWindow::createMenusAndToolbars() {
     m_fileMenu = menuBar()->addMenu(QString());
     m_fileMenu->setObjectName(QStringLiteral("fileMenu"));
-    m_fileMenu->addActions({m_openAction, m_openDirAction, m_changeSaveDirAction, m_openAnnotationAction});
+    m_fileMenu->addActions({m_openAction, m_openDirAction});
+    m_openMoreMenu = m_fileMenu->addMenu(QString());
+    m_openMoreMenu->setObjectName(QStringLiteral("openMoreMenu"));
+    m_openMoreMenu->addAction(m_openYoloDatasetAction);
+    m_onnxDetectionAction = m_openMoreMenu->addAction(QString());
+    m_onnxDetectionAction->setObjectName(QStringLiteral("onnxDetectionAction"));
+    connect(m_onnxDetectionAction, &QAction::triggered, this, &MainWindow::openOnnxDetection);
+    m_fileMenu->addActions({m_changeSaveDirAction, m_openAnnotationAction});
     m_recentFilesMenu = m_fileMenu->addMenu(QString());
     m_recentFilesMenu->setObjectName(QStringLiteral("recentFilesMenu"));
     m_recentDirsMenu = m_fileMenu->addMenu(QString());
@@ -2486,6 +2498,7 @@ void MainWindow::installFramelessChrome() {
 void MainWindow::connectSignals() {
     connect(m_openAction, &QAction::triggered, this, &MainWindow::openFile);
     connect(m_openDirAction, &QAction::triggered, this, &MainWindow::openDir);
+    connect(m_openYoloDatasetAction, &QAction::triggered, this, &MainWindow::openYoloDatasetDialog);
     connect(m_openAnnotationAction, &QAction::triggered, this, &MainWindow::openAnnotationDialog);
     connect(m_openWithImageViewerAction, &QAction::triggered, this, &MainWindow::openCurrentImageWithViewer);
     connect(m_openFileLocationAction, &QAction::triggered, this, &MainWindow::revealCurrentImageInFolder);
@@ -2804,7 +2817,7 @@ void MainWindow::connectSignals() {
 void MainWindow::loadSettings() {
     QString savedLanguage = m_settings.value("language").toString();
     if (savedLanguage.isEmpty()) {
-        savedLanguage = StringBundle::systemLanguage();
+        savedLanguage = QStringLiteral("zh-CN");
         m_settings.setValue("language", savedLanguage);
     }
     m_strings = StringBundle(savedLanguage);
@@ -2837,6 +2850,8 @@ void MainWindow::saveLastFileByDir() {
 }
 
 void MainWindow::saveSettings() {
+    m_settings.setValue("activeYoloDatasetConfig", m_yoloDataset.configPath);
+    m_settings.setValue("activeYoloDatasetImage", m_yoloDataset.isOpen() ? m_filePath : QString());
     m_settings.setValue("language", m_strings.language());
     m_settings.setValue("savedir", m_saveDir);
     m_settings.setValue("labelFileFormat", static_cast<int>(m_format));
@@ -3075,6 +3090,7 @@ void MainWindow::applyShapeLabelColors(Shape *shape) const {
 }
 
 bool MainWindow::validateLabel(const QString &label) const {
+    if (m_yoloDataset.isOpen()) return m_yoloDataset.classes.contains(label.trimmed());
     if (m_validateLabelPolicy.isEmpty()) {
         return true;
     }
@@ -3096,6 +3112,13 @@ void MainWindow::rememberLastUsedLabel(const QString &label) {
 }
 
 bool MainWindow::loadImage(const QString &path) {
+    // Check stale queue entries before asking to save or discard current edits.
+    if (m_imageList.contains(path) && !QFileInfo(path).isFile()) {
+        QMessageBox::warning(this, QStringLiteral("labelImgCpp"),
+                             m_strings.get(QStringLiteral("cannotOpen")).arg(path));
+        reloadImageQueue();
+        return false;
+    }
     if (!maybeSave()) return false;
     const bool copyPreviousOnNavigation = m_copyPreviousNavigation;
     const bool keepPrevious = (m_keepPreviousAction && m_keepPreviousAction->isChecked()) ||
@@ -3123,8 +3146,11 @@ bool MainWindow::loadImage(const QString &path) {
     if (image.isNull()) {
         QMessageBox::warning(this, QStringLiteral("labelImgCpp"),
                              m_strings.get(QStringLiteral("cannotOpen")).arg(path));
+        // Also handle deletion between the initial check and image decoding.
+        if (m_imageList.contains(path) && !QFileInfo(path).isFile()) reloadImageQueue();
         return false;
     }
+    if (m_yoloDataset.isOpen() && m_yoloDataset.annotationPath(path).isEmpty()) leaveYoloDataset();
     m_filePath = QFileInfo(path).absoluteFilePath();
     m_annotationPathOverride.clear();
     m_hasAnnotationPathOverride = false;
@@ -3150,7 +3176,7 @@ bool MainWindow::loadImage(const QString &path) {
     QString annotationLoadError;
     loadAnnotationsForCurrentImage(&annotationLoadError);
     m_annotationLoadFailed = !annotationLoadError.isEmpty();
-    const bool carriedPrevious = keepPrevious && !previousShapes.isEmpty() && m_canvas->shapes().isEmpty();
+    const bool carriedPrevious = !m_yoloDataset.isOpen() && keepPrevious && !previousShapes.isEmpty() && m_canvas->shapes().isEmpty();
     if (carriedPrevious) {
         m_canvas->setShapes(previousShapes);
         statusBar()->showMessage(m_strings.get(QStringLiteral("keepPreviousAnnotationStatus")), 3000);
@@ -3240,6 +3266,7 @@ bool MainWindow::loadLabelMeWithRepair(const QString &path, AnnotationDocument *
 }
 
 bool MainWindow::loadAnnotation(const QString &path) {
+    if (m_yoloDataset.isOpen()) return false;
     if (m_filePath.isEmpty() || path.isEmpty()) return false;
     const auto fail = [this, &path](const QString &detail) {
         statusBar()->showMessage(m_strings.get(QStringLiteral("failedLoad")).arg(path, detail), 8000);
@@ -3367,6 +3394,7 @@ bool MainWindow::loadStandaloneLabelMe(const QString &path) {
                                          : annotationInfo.dir().filePath(doc.imagePath))
                                   : resolvedImagePath;
 
+    leaveYoloDataset();
     setFormat(SaveFormat::LabelMe);
     m_filePath = QFileInfo(imagePath).absoluteFilePath();
     m_annotationPathOverride = annotationInfo.absoluteFilePath();
@@ -3424,7 +3452,7 @@ bool MainWindow::loadStandaloneLabelMe(const QString &path) {
 AnnotationDocument MainWindow::readAnnotationForImage(const QString &imagePath, const QSize &imageSize,
                                          const QString &saveDir, const QString &outputFilePath,
                                          SaveFormat format, SaveFormat *detectedFormat,
-                                         QString *errorMessage, bool previewOnly) {
+                                         QString *errorMessage, bool previewOnly, const YoloDataset &dataset) {
     const auto readLabelMe = [previewOnly](const QString &path, AnnotationDocument *document, QString *error) {
         if (!previewOnly) return AnnotationIO::loadLabelMe(path, document, error);
         // Indexing and thumbnails only need metadata. Actual annotation loading
@@ -3452,6 +3480,15 @@ AnnotationDocument MainWindow::readAnnotationForImage(const QString &imagePath, 
     }
     doc.imagePath = imagePath;
     doc.imageSize = imageSize;
+    if (dataset.isOpen()) {
+        const QString labelPath = dataset.annotationPath(imagePath);
+        if (detectedFormat) *detectedFormat = SaveFormat::Yolo;
+        if (labelPath.isEmpty() || (QFileInfo::exists(labelPath) &&
+            !AnnotationIO::loadYoloWithClasses(labelPath, imageSize, &doc, dataset.classes))) {
+            if (errorMessage) *errorMessage = QStringLiteral("%1: invalid YOLO detection annotation").arg(labelPath);
+        }
+        return doc;
+    }
     if (format == SaveFormat::LabelMe && !outputFilePath.isEmpty()) {
         const QFileInfo outputInfo(outputFilePath);
         if (outputInfo.exists()) {
@@ -3545,7 +3582,7 @@ AnnotationDocument MainWindow::annotationDocumentForImage(const QString &imagePa
                                                           SaveFormat *detectedFormat,
                                                           QString *errorMessage) const {
     return readAnnotationForImage(imagePath, imageSize, m_saveDir, m_outputFilePath,
-                                  m_format, detectedFormat, errorMessage);
+                                  m_format, detectedFormat, errorMessage, false, m_yoloDataset);
 }
 
 void MainWindow::loadAnnotationsForCurrentImage(QString *errorMessage) {
@@ -3723,7 +3760,7 @@ void MainWindow::populateFileList(bool reloadMetadata) {
 }
 
 QImage MainWindow::readFileThumbnail(const QString &path, const QString &saveDir,
-                         const QString &outputFilePath, SaveFormat format) {
+                         const QString &outputFilePath, SaveFormat format, const YoloDataset &dataset) {
     QSize sourceSize;
     const QImage image = ImageIO::readPreview(path, 512, &sourceSize);
     if (image.isNull()) {
@@ -3746,7 +3783,7 @@ QImage MainWindow::readFileThumbnail(const QString &path, const QString &saveDir
     painter.drawImage(targetRect, image);
 
     const AnnotationDocument doc = readAnnotationForImage(path, sourceSize, saveDir, outputFilePath,
-                                                         format, nullptr, nullptr, true);
+                                                         format, nullptr, nullptr, true, dataset);
     if (!doc.imageSize.isEmpty()) {
         const double xScale = static_cast<double>(targetRect.width()) / doc.imageSize.width();
         const double yScale = static_cast<double>(targetRect.height()) / doc.imageSize.height();
@@ -3800,6 +3837,7 @@ void MainWindow::loadVisibleFileThumbnails() {
         const QString saveDir = m_saveDir;
         const QString outputFilePath = m_outputFilePath;
         const SaveFormat format = m_format;
+        const YoloDataset dataset = m_yoloDataset;
         auto *watcher = new QFutureWatcher<QImage>(this);
         connect(watcher, &QFutureWatcher<QImage>::finished, this, [this, watcher, path, generation]() {
             const QImage image = watcher->result();
@@ -3815,8 +3853,8 @@ void MainWindow::loadVisibleFileThumbnails() {
             }
             QTimer::singleShot(0, this, &MainWindow::loadVisibleFileThumbnails);
         });
-        watcher->setFuture(QtConcurrent::run(&m_thumbnailPool, [path, saveDir, outputFilePath, format]() {
-            return readFileThumbnail(path, saveDir, outputFilePath, format);
+        watcher->setFuture(QtConcurrent::run(&m_thumbnailPool, [path, saveDir, outputFilePath, format, dataset]() {
+            return readFileThumbnail(path, saveDir, outputFilePath, format, dataset);
         }));
         break; // One decoder and only visible work: no directory-sized queue or memory spike.
     }
@@ -3826,7 +3864,7 @@ QStringList MainWindow::labelsForImage(const QString &path) const {
     // Label extraction does not need image pixels or actual box coordinates.
     // A valid unit size lets YOLO decode labels without opening the image.
     const AnnotationDocument doc = readAnnotationForImage(path, QSize(1, 1), m_saveDir,
-                                                         m_outputFilePath, m_format, nullptr, nullptr, true);
+                                                         m_outputFilePath, m_format, nullptr, nullptr, true, m_yoloDataset);
     QSet<QString> uniqueLabels;
     for (const Shape &shape : doc.shapes) {
         const QString label = shape.label.trimmed();
@@ -3857,22 +3895,26 @@ void MainWindow::rebuildFileLabelFilterMenu(bool reloadLabels) {
 #endif
         };
         QSet<QString> directories;
-        for (const QString &path : m_imageList) directories.insert(QFileInfo(path).absolutePath());
+        for (const QString &path : m_imageList) {
+            directories.insert(QFileInfo(m_yoloDataset.isOpen() ? m_yoloDataset.annotationPath(path) : path).absolutePath());
+        }
         const QString saveDirectory = m_saveDir.isEmpty() ? QString() : QFileInfo(m_saveDir).absoluteFilePath();
         if (!saveDirectory.isEmpty()) directories.insert(saveDirectory);
         QHash<QString, QSet<QString>> annotationNames;
         for (const QString &directory : directories) {
             QSet<QString> names;
             const QStringList sidecars = QDir(directory).entryList(
-                {"*.xml", "*.txt", "*.json"}, QDir::Files, QDir::NoSort);
+                m_yoloDataset.isOpen() ? QStringList{"*.txt"} : QStringList{"*.xml", "*.txt", "*.json"}, QDir::Files, QDir::NoSort);
             for (const QString &name : sidecars) names.insert(pathKey(QFileInfo(name).completeBaseName()));
             annotationNames.insert(directory, names);
         }
         for (const QString &path : m_imageList) {
             const QFileInfo info(path);
             const QString base = pathKey(info.completeBaseName());
-            const bool annotated = annotationNames.value(info.absolutePath()).contains(base) ||
-                                   (!saveDirectory.isEmpty() && annotationNames.value(saveDirectory).contains(base));
+            const bool annotated = m_yoloDataset.isOpen()
+                ? annotationNames.value(QFileInfo(m_yoloDataset.annotationPath(path)).absolutePath()).contains(base)
+                : annotationNames.value(info.absolutePath()).contains(base) ||
+                  (!saveDirectory.isEmpty() && annotationNames.value(saveDirectory).contains(base));
             if (annotated) m_annotatedFiles.insert(path);
             if (annotated || !m_outputFilePath.isEmpty()) m_fileLabels.insert(path, labelsForImage(path));
         }
@@ -4024,6 +4066,9 @@ void MainWindow::refreshFileListSelection() {
 void MainWindow::refreshTexts() {
     m_openAction->setText(m_strings.get("openFile"));
     m_openDirAction->setText(m_strings.get("openDir"));
+    m_openMoreMenu->setTitle(m_strings.get("openMore"));
+    m_openYoloDatasetAction->setText(m_strings.get("openYoloDataset"));
+    m_onnxDetectionAction->setText(m_strings.get("onnxDetection"));
     m_openAnnotationAction->setText(m_strings.get("openAnnotation"));
     m_openWithImageViewerAction->setText(m_strings.get("openWithImageViewer"));
     m_openFileLocationAction->setText(m_strings.get("openFileLocation"));
@@ -4414,6 +4459,7 @@ void MainWindow::refreshActions() {
     bool hasImage = !m_filePath.isEmpty();
     const bool editingAllowed = !m_editabilityAction || m_editabilityAction->isChecked();
     const bool drawing = m_canvas->isDrawing();
+    m_onnxDetectionAction->setEnabled(editingAllowed && !drawing && !m_aiRequestRunning && !m_annotationLoadFailed);
     m_repeatCreateAction->setEnabled(hasImage && editingAllowed && !drawing);
     if (m_footerCreateShortcut) m_footerCreateShortcut->setEnabled(m_repeatCreateAction->isEnabled());
     // Canvas owns the editing selection. The label list can retain a visual
@@ -4421,8 +4467,8 @@ void MainWindow::refreshActions() {
     // enable destructive/editing actions by itself.
     const bool hasSelection = m_canvas->hasSelection();
     m_saveAction->setEnabled(hasImage && m_dirty && !m_annotationLoadFailed);
-    m_saveAsAction->setEnabled(hasImage);
-    m_openAnnotationAction->setEnabled(hasImage);
+    m_saveAsAction->setEnabled(hasImage && !m_yoloDataset.isOpen());
+    m_openAnnotationAction->setEnabled(hasImage && !m_yoloDataset.isOpen());
     m_openWithImageViewerAction->setEnabled(hasImage);
     m_openFileLocationAction->setEnabled(hasImage);
     if (m_openWithButton) {
@@ -4430,7 +4476,8 @@ void MainWindow::refreshActions() {
     }
     updateFileContextActions();
     m_closeAction->setEnabled(hasImage);
-    m_changeSaveDirAction->setEnabled(true);
+    m_changeSaveDirAction->setEnabled(!m_yoloDataset.isOpen());
+    m_formatAction->setEnabled(!m_yoloDataset.isOpen());
     m_verifyAction->setEnabled(hasImage && !drawing);
     m_undoAction->setEnabled(!drawing && !m_undoStack.isEmpty());
     m_undoLastPointAction->setEnabled(drawing && editingAllowed);
@@ -4469,7 +4516,8 @@ void MainWindow::refreshActions() {
     }
     for (QAction *action : createActions) {
         if (action) {
-            action->setEnabled(hasImage && editingAllowed && action != activeCreateAction);
+            const bool supported = !m_yoloDataset.isOpen() || action == m_createModeAction;
+            action->setEnabled(hasImage && editingAllowed && supported && action != activeCreateAction);
         }
     }
     const bool maskSelected = m_canvas->hasSelection() &&
@@ -4635,17 +4683,7 @@ void MainWindow::loadRecentDir(const QString &path) {
         rebuildRecentDirsMenu();
         return;
     }
-    if (!maybeSave()) return;
-    m_settings.setValue("lastOpenDir", path);
-    m_dirPath = QFileInfo(path).absoluteFilePath();
-    m_imageList = scanImages(m_dirPath);
-    m_currentImageIndex = 0;
-    populateFileList();
-    addRecentDir(m_dirPath);
-    const QString preferred = preferredImageForCurrentDir();
-    if (!preferred.isEmpty()) {
-        loadImage(preferred);
-    }
+    openDirectory(path);
 }
 
 QString MainWindow::preferredImageForCurrentDir() const {
@@ -4666,6 +4704,7 @@ void MainWindow::setFileThumbnailMode(bool enabled) {
 }
 
 void MainWindow::setFormat(SaveFormat format) {
+    if (m_yoloDataset.isOpen()) format = SaveFormat::Yolo;
     m_format = format;
     m_formatAction->setText(currentFormatName());
     assignActionIcons();
@@ -4847,6 +4886,9 @@ void MainWindow::openFile() {
 
 bool MainWindow::openPath(const QString &path) {
     const QFileInfo info(path);
+    if (info.isDir()) return openDirectory(info.absoluteFilePath());
+    if (info.suffix().compare("yaml", Qt::CaseInsensitive) == 0 ||
+        info.suffix().compare("yml", Qt::CaseInsensitive) == 0) return openYoloDataset(path);
     if (!info.isFile()) {
         return false;
     }
@@ -4872,17 +4914,112 @@ bool MainWindow::openPath(const QString &path) {
     return true;
 }
 
+void MainWindow::openYoloDatasetDialog() {
+    const QString dir = QFileDialog::getExistingDirectory(this, m_strings.get("openYoloDataset"),
+        m_settings.value("lastYoloDatasetDir", m_settings.value("lastOpenDir")).toString());
+    if (!dir.isEmpty() && !openYoloDataset(dir)) {
+        QMessageBox::warning(this, QStringLiteral("labelImgCpp"), statusBar()->currentMessage());
+    }
+}
+
+bool MainWindow::openYoloDataset(const QString &path) {
+    YoloDataset dataset;
+    QString error;
+    if (!YoloDataset::load(path, &dataset, &error)) {
+        statusBar()->showMessage(m_strings.get("failedLoad").arg(path, error), 8000);
+        return false;
+    }
+    const QStringList images = scanImages(QDir(dataset.root).filePath("images"));
+    if (images.isEmpty()) {
+        statusBar()->showMessage(m_strings.get("yoloDatasetNoImages"), 8000);
+        return false;
+    }
+    if (!maybeSave()) {
+        statusBar()->showMessage(m_strings.get("yoloDatasetOpenCancelled"), 3000);
+        return false;
+    }
+    if (!m_yoloDataset.isOpen()) m_classesBeforeDataset = m_classList;
+    setDirty(false);
+    m_yoloDataset = dataset;
+    m_classList = dataset.classes;
+    {
+        QSignalBlocker blocker(m_defaultLabelCombo);
+        m_defaultLabelCombo->clear();
+        m_defaultLabelCombo->addItems(m_classList);
+    }
+    m_lastUsedLabel = m_classList.first();
+    refreshUniqueLabelList();
+    m_annotationPathOverride.clear();
+    m_hasAnnotationPathOverride = false;
+    setFormat(SaveFormat::Yolo);
+    setCreateShapeMode(QStringLiteral("rectangle"), m_createModeAction);
+    setEditMode();
+    m_dirPath = dataset.root;
+    m_imageList = images;
+    m_currentImageIndex = 0;
+    m_fileLabelFilter.clear();
+    populateFileList();
+    addRecentDir(dataset.root);
+    m_settings.setValue("lastYoloDatasetDir", dataset.root);
+    const bool loaded = loadImage(preferredImageForCurrentDir());
+    refreshActions();
+    return loaded;
+}
+
+void MainWindow::leaveYoloDataset() {
+    if (!m_yoloDataset.isOpen()) return;
+    m_yoloDataset = {};
+    m_classList = m_classesBeforeDataset;
+    m_classesBeforeDataset.clear();
+    {
+        QSignalBlocker blocker(m_defaultLabelCombo);
+        m_defaultLabelCombo->clear();
+        m_defaultLabelCombo->addItems(m_classList);
+    }
+    refreshUniqueLabelList();
+    syncFormatFooterControls();
+    refreshActions();
+}
+
 void MainWindow::openDir() {
-    QString dir = QFileDialog::getExistingDirectory(this, m_strings.get("openDir"), m_settings.value("lastOpenDir").toString());
-    if (dir.isEmpty()) return;
-    m_settings.setValue("lastOpenDir", dir);
-    m_dirPath = dir;
-    m_imageList = scanImages(dir);
+    const QString dir = QFileDialog::getExistingDirectory(this, m_strings.get("openDir"), m_settings.value("lastOpenDir").toString());
+    if (!dir.isEmpty()) openDirectory(dir);
+}
+
+bool MainWindow::openDirectory(const QString &path) {
+    if (!QFileInfo(path).isDir()) return false;
+    // Only offer a dataset mode after validating its structure and class map.
+    // A generic YAML file or incomplete dataset keeps the normal folder rules.
+    YoloDataset detected;
+    QString error;
+    if (YoloDataset::load(path, &detected, &error)) {
+        QMessageBox box(QMessageBox::Question, m_strings.get("datasetDetectedTitle"),
+                        m_strings.get("yoloDatasetDetectedPrompt")
+                            .arg(QDir::toNativeSeparators(detected.root))
+                            .arg(detected.classes.size()),
+                        QMessageBox::Ok | QMessageBox::Cancel, this);
+        box.setObjectName(QStringLiteral("datasetDetectedDialog"));
+        box.setTextFormat(Qt::PlainText);
+        box.button(QMessageBox::Ok)->setText(m_strings.get("datasetOpenConfirm"));
+        box.button(QMessageBox::Cancel)->setText(m_strings.get("datasetOpenCancel"));
+        box.setDefaultButton(QMessageBox::Ok);
+        box.setEscapeButton(QMessageBox::Cancel);
+        if (box.exec() == QMessageBox::Ok) return openYoloDataset(detected.configPath);
+        // Cancel, Escape and the window close button all choose normal opening.
+    }
+    if (!maybeSave()) return false;
+    leaveYoloDataset();
+    setDirty(false);
+    m_settings.setValue("lastOpenDir", path);
+    m_dirPath = QFileInfo(path).absoluteFilePath();
+    m_imageList = scanImages(m_dirPath);
     m_currentImageIndex = 0;
     populateFileList();
     addRecentDir(m_dirPath);
     const QString preferred = preferredImageForCurrentDir();
-    if (!preferred.isEmpty()) loadImage(preferred);
+    if (!preferred.isEmpty()) return loadImage(preferred);
+    closeFile();
+    return true;
 }
 
 void MainWindow::openAnnotationDialog() {
@@ -4927,16 +5064,34 @@ void MainWindow::revealCurrentImageInFolder() {
 #endif
 }
 
+void MainWindow::reloadImageQueue() {
+    if (m_dirPath.isEmpty()) return;
+    const QString directory = m_yoloDataset.isOpen()
+                                  ? QDir(m_yoloDataset.root).filePath(QStringLiteral("images"))
+                                  : m_dirPath;
+    m_imageList = scanImages(directory);
+    // Keep the loaded image and its edits. If it too has disappeared, the next
+    // navigation starts at the beginning of the newly scanned queue.
+    m_currentImageIndex = m_imageList.indexOf(m_filePath);
+    populateFileList();
+    refreshActions();
+    statusBar()->showMessage(m_strings.get("imageQueueReloaded").arg(m_imageList.size()), 5000);
+}
+
 void MainWindow::openNextImage() {
-    if (m_imageList.isEmpty()) return;
-    if (m_currentImageIndex + 1 < m_imageList.size()) ++m_currentImageIndex;
-    loadImage(m_imageList[m_currentImageIndex]);
+    if (m_imageList.isEmpty() || m_currentImageIndex + 1 >= m_imageList.size()) {
+        statusBar()->showMessage(m_strings.get("noNextImage"), 5000);
+        return;
+    }
+    // loadImage commits the index only after a successful load.
+    const QString nextPath = m_imageList[m_currentImageIndex + 1];
+    loadImage(nextPath);
 }
 
 void MainWindow::openPrevImage() {
     if (m_imageList.isEmpty()) return;
-    if (m_currentImageIndex > 0) --m_currentImageIndex;
-    loadImage(m_imageList[m_currentImageIndex]);
+    const QString previousPath = m_imageList[qMax(0, m_currentImageIndex - 1)];
+    loadImage(previousPath);
 }
 
 void MainWindow::closeFile() {
@@ -4996,7 +5151,14 @@ bool MainWindow::saveCurrentFile() {
     AnnotationDocument doc = currentDocument();
     bool ok = false;
     if (m_format == SaveFormat::PascalVoc) ok = AnnotationIO::savePascalVoc(path, doc);
-    if (m_format == SaveFormat::Yolo) ok = AnnotationIO::saveYolo(path, doc, m_classList);
+    if (m_format == SaveFormat::Yolo) {
+        if (m_yoloDataset.isOpen()) {
+            ok = !path.isEmpty() && QDir().mkpath(QFileInfo(path).absolutePath()) &&
+                 AnnotationIO::saveYolo(path, doc, m_yoloDataset.classes, false);
+        } else {
+            ok = AnnotationIO::saveYolo(path, doc, m_classList);
+        }
+    }
     if (m_format == SaveFormat::CreateMl) ok = AnnotationIO::saveCreateMl(path, doc);
     if (m_format == SaveFormat::LabelMe) ok = AnnotationIO::saveLabelMe(path, doc);
     if (ok) {
@@ -5013,6 +5175,7 @@ void MainWindow::saveFile() {
 }
 
 void MainWindow::saveFileAs() {
+    if (m_yoloDataset.isOpen()) return;
     QString filter;
     QString defaultSuffix;
     if (m_format == SaveFormat::PascalVoc) {
@@ -5071,6 +5234,7 @@ void MainWindow::saveFileAs() {
 }
 
 void MainWindow::changeSaveDir() {
+    if (m_yoloDataset.isOpen()) return;
     QString dir = QFileDialog::getExistingDirectory(this, m_strings.get("changeSaveDir"), m_saveDir);
     if (!dir.isEmpty()) {
         m_saveDir = dir;
@@ -5080,6 +5244,7 @@ void MainWindow::changeSaveDir() {
 }
 
 void MainWindow::changeFormat() {
+    if (m_yoloDataset.isOpen()) return;
     if (m_format == SaveFormat::PascalVoc) setFormat(SaveFormat::Yolo);
     else if (m_format == SaveFormat::Yolo) setFormat(SaveFormat::CreateMl);
     else if (m_format == SaveFormat::CreateMl) setFormat(SaveFormat::LabelMe);
@@ -6902,6 +7067,32 @@ void MainWindow::onCanvasShapeCreated(int index) {
     editCreatedShapeLabel(index);
 }
 
+void MainWindow::openOnnxDetection() {
+    if (m_aiRequestRunning || m_canvas->isDrawing() || m_annotationLoadFailed ||
+        (m_editabilityAction && !m_editabilityAction->isChecked())) return;
+    QTemporaryDir temporary;
+    QString imagePath;
+    if (!m_filePath.isEmpty()) {
+        // Snapshot the original, oriented image, including embedded LabelMe images.
+        QImage image;
+        if (!m_labelMeImageData.isEmpty()) {
+            image.loadFromData(QByteArray::fromBase64(m_labelMeImageData.toLatin1()));
+            image = ImageIO::normalizeForDisplay(image);
+        } else {
+            image = ImageIO::readForDisplay(m_filePath);
+        }
+        imagePath = temporary.filePath(QStringLiteral("image.png"));
+        if (!temporary.isValid() || image.isNull() || !image.save(imagePath)) {
+            QMessageBox::warning(this, m_strings.get("onnxDetection"), m_strings.get("onnxImageFailed"));
+            return;
+        }
+    }
+    OnnxDetectionDialog dialog(imagePath, m_yoloDataset.classes, m_settings, m_strings, this);
+    if (dialog.exec() == QDialog::Accepted) {
+        finishAiTextAssist(dialog.shapes(), dialog.iouThreshold());
+    }
+}
+
 QString MainWindow::aiBridgeScriptPath() const {
     const QString configuredPath = m_settings.value(QStringLiteral("ai/bridgePath")).toString().trimmed();
     if (!configuredPath.isEmpty() && QFileInfo::exists(configuredPath)) {
@@ -7730,6 +7921,34 @@ void MainWindow::selectAdjacentLabel(int step) {
     selectLabelRow(next);
 }
 
+void MainWindow::scrollCanvasToCurrentShape() {
+    if (!m_canvas || !m_scrollArea) return;
+    const int index = m_canvas->currentIndex();
+    const auto shapes = m_canvas->shapes();
+    if (index < 0 || index >= shapes.size() || shapes[index].points.isEmpty()) return;
+
+    const qreal scale = m_canvas->scale();
+    const QRectF bounds = shapes[index].boundingRect();
+    const QPointF origin = m_canvas->imageOriginOffset();
+    // Annotation coordinates are in the original image, including preview mode.
+    // Canvas adds overscroll padding before scaling; include it in the mapping.
+    QRectF target((bounds.topLeft() + origin) * scale,
+                  (bounds.bottomRight() + origin) * scale);
+    if (target.width() < 1) target.adjust(-0.5, 0, 0.5, 0);
+    if (target.height() < 1) target.adjust(0, -0.5, 0, 0.5);
+    QWidget *viewport = m_scrollArea->viewport();
+    const QRectF visible(m_canvas->mapFrom(viewport, QPoint(0, 0)), viewport->size());
+    if (visible.contains(target)) return;
+
+    // Keep the user's zoom. Oversized annotations show their center; scrollbars
+    // clamp naturally at image edges. Ordinary selection/mouse edits never pan.
+    const QPointF delta = target.center() - visible.center();
+    auto *horizontal = m_scrollArea->horizontalScrollBar();
+    auto *vertical = m_scrollArea->verticalScrollBar();
+    horizontal->setValue(horizontal->value() + qRound(delta.x()));
+    vertical->setValue(vertical->value() + qRound(delta.y()));
+}
+
 void MainWindow::selectAdjacentShape(int step) {
     const int count = m_canvas ? m_canvas->shapes().size() : 0;
     if (count == 0) {
@@ -7744,20 +7963,24 @@ void MainWindow::selectAdjacentShape(int step) {
             m_labelList->clearSelection();
         } else {
             selectLabelRow(0);
+            scrollCanvasToCurrentShape();
         }
         refreshActions();
         return;
     }
     if (row < 0) {
         selectLabelRow(0);
+        scrollCanvasToCurrentShape();
         return;
     }
     int next = (row + step) % count;
     if (next < 0) next += count;
     selectLabelRow(next);
+    scrollCanvasToCurrentShape();
 }
 
 QString MainWindow::annotationPathForImage(const QString &imagePath) const {
+    if (m_yoloDataset.isOpen()) return m_yoloDataset.annotationPath(imagePath);
     if (m_format == SaveFormat::LabelMe && !m_outputFilePath.isEmpty()) {
         return m_outputFilePath;
     }
@@ -7775,6 +7998,7 @@ bool MainWindow::usesAnnotationPathOverride() const {
 }
 
 bool MainWindow::hasAnnotationForImage(const QString &imagePath) const {
+    if (m_yoloDataset.isOpen()) return QFileInfo::exists(m_yoloDataset.annotationPath(imagePath));
     if (imagePath.isEmpty()) {
         return false;
     }
@@ -7893,6 +8117,7 @@ void MainWindow::syncFormatFooterControls() {
     if (!m_footerFormatCombo) {
         return;
     }
+    m_footerFormatCombo->setEnabled(!m_yoloDataset.isOpen());
     const int index = static_cast<int>(m_format);
     if (m_footerFormatCombo->currentIndex() != index) {
         QSignalBlocker blocker(m_footerFormatCombo);
