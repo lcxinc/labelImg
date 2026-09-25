@@ -36,4 +36,6 @@ private:
     bool m_hovered = false;
     bool m_dragging = false;
     QImage m_overview;
+    QVector<QRectF> m_shapeBounds;
+    QRectF m_lastViewportRect;
 };

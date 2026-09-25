@@ -4,6 +4,9 @@
 #include "core/AiAssistBridge.h"
 #include "core/ImageIO.h"
 #include "core/WindowChrome.h"
+#include "ui/ShortcutCaptureEdit.h"
+#include "ui/OnnxDetectionDialog.h"
+#include <QTemporaryDir>
 
 #include <QAbstractButton>
 #include <QApplication>
@@ -28,6 +31,7 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QHash>
+#include <QHeaderView>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QImageReader>
@@ -58,8 +62,13 @@
 #include <QStringListModel>
 #include <QStandardPaths>
 #include <QStatusBar>
+#include <QStackedWidget>
+#include <QStyle>
 #include <QTabWidget>
+#include <QTableWidget>
 #include <QTimer>
+#include <QFutureWatcher>
+#include <QtConcurrentRun>
 #include <QThread>
 #include <QToolButton>
 #include <QToolBar>
@@ -330,6 +339,38 @@ QString labelFlagPresetSourceFromConfig(const QVariantMap &values) {
     }
     return lines.join(QLatin1Char('\n'));
 }
+
+class LabelSpaceConfirmFilter final : public QObject {
+public:
+    LabelSpaceConfirmFilter(QLineEdit *editor, QListWidget *history, QPushButton *ok, QObject *parent)
+        : QObject(parent), m_editor(editor), m_history(history), m_ok(ok) {
+        editor->installEventFilter(this);
+        history->installEventFilter(this);
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (event->type() == QEvent::KeyPress) {
+            auto *key = static_cast<QKeyEvent *>(event);
+            // The preselected label is ready for fast confirmation. Once the
+            // user edits it, spaces belong to the label just like normal text.
+            const bool ready = watched == m_history ||
+                               (watched == m_editor && m_editor->hasSelectedText() &&
+                                m_editor->selectedText() == m_editor->text());
+            if (ready && key->key() == Qt::Key_Space && key->modifiers() == Qt::NoModifier &&
+                !m_editor->text().trimmed().isEmpty()) {
+                if (!key->isAutoRepeat()) m_ok->click();
+                return true;
+            }
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    QLineEdit *m_editor;
+    QListWidget *m_history;
+    QPushButton *m_ok;
+};
 
 class LabelListKeyForwarder final : public QObject {
 public:
@@ -725,6 +766,13 @@ MainWindow::MainWindow(QWidget *parent, const QString &defaultConfigPath)
     applyNativeWindowChrome();
     m_defaultDockState = saveState(DockStateVersion);
     connectSignals();
+    m_thumbnailPool.setMaxThreadCount(1);
+    const auto updateClipboard = [this]() {
+        m_externalClipboardHasShapes = !shapesFromClipboardMime(QApplication::clipboard()->mimeData()).isEmpty();
+        refreshActions();
+    };
+    connect(QApplication::clipboard(), &QClipboard::dataChanged, this, updateClipboard);
+    m_externalClipboardHasShapes = !shapesFromClipboardMime(QApplication::clipboard()->mimeData()).isEmpty();
     m_aiSession = new AiAssistSession(this);
     connect(m_aiSession, &AiAssistSession::responseReady,
             this, &MainWindow::onAiSessionResponse);
@@ -1064,18 +1112,19 @@ void MainWindow::loadStartupArgs(const QStringList &arguments) {
         }
         QFileInfo startupInfo(positional.at(1));
         if (startupInfo.isDir()) {
-            m_dirPath = startupInfo.absoluteFilePath();
-            m_settings.setValue("lastOpenDir", m_dirPath);
-            m_imageList = scanImages(m_dirPath);
-            populateFileList();
-            m_currentImageIndex = 0;
-            addRecentDir(m_dirPath);
-            const QString preferred = preferredImageForCurrentDir();
-            if (!preferred.isEmpty()) loadImage(preferred);
+            openDirectory(startupInfo.absoluteFilePath());
         } else {
             openPath(startupInfo.absoluteFilePath());
         }
     } else {
+        const QString datasetConfig = m_settings.value("activeYoloDatasetConfig").toString();
+        if (!datasetConfig.isEmpty() && QFileInfo::exists(datasetConfig)) {
+            const QString lastDatasetImage = m_settings.value("activeYoloDatasetImage").toString();
+            if (openYoloDataset(datasetConfig)) {
+                if (m_imageList.contains(lastDatasetImage) && lastDatasetImage != m_filePath) loadImage(lastDatasetImage);
+                return;
+            }
+        }
         QString lastFile = m_settings.value("filename").toString();
         if (!lastFile.isEmpty() && QFileInfo::exists(lastFile)) {
             loadImage(lastFile);
@@ -1160,60 +1209,47 @@ void MainWindow::applyLabelMeConfig(const QVariantMap &values, const QStringList
     if (values.contains(QStringLiteral("fit_to_content.row"))) {
         m_labelMeFitToContentRow = values.value(QStringLiteral("fit_to_content.row")).toBool();
     }
-    const QHash<QString, QAction *> shortcutActions = {
-        {QStringLiteral("close"), m_closeAction},
-        {QStringLiteral("quit"), m_quitAction},
-        {QStringLiteral("open"), m_openAction},
-        {QStringLiteral("open_dir"), m_openDirAction},
-        {QStringLiteral("save"), m_saveAction},
-        {QStringLiteral("save_as"), m_saveAsAction},
-        {QStringLiteral("save_to"), m_changeSaveDirAction},
-        {QStringLiteral("delete_file"), m_deleteAnnotationAction},
-        {QStringLiteral("open_next"), m_nextAction},
-        {QStringLiteral("open_prev"), m_prevAction},
-        {QStringLiteral("zoom_in"), m_zoomInAction},
-        {QStringLiteral("zoom_out"), m_zoomOutAction},
-        {QStringLiteral("zoom_to_original"), m_zoomOriginalAction},
-        {QStringLiteral("fit_window"), m_fitWindowAction},
-        {QStringLiteral("fit_width"), m_fitWidthAction},
-        {QStringLiteral("create_polygon"), m_createPolygonModeAction},
-        {QStringLiteral("create_rectangle"), m_createModeAction},
-        {QStringLiteral("create_oriented_rectangle"), m_createOrientedRectangleModeAction},
-        {QStringLiteral("create_circle"), m_createCircleModeAction},
-        {QStringLiteral("create_line"), m_createLineModeAction},
-        {QStringLiteral("create_point"), m_createPointModeAction},
-        {QStringLiteral("create_linestrip"), m_createLinestripModeAction},
-        {QStringLiteral("create_points"), m_createPointsModeAction},
-        {QStringLiteral("create_mask"), m_createMaskModeAction},
-        {QStringLiteral("create_ai_points"), m_createAiPointsModeAction},
-        {QStringLiteral("create_ai_box"), m_createAiBoxModeAction},
-        {QStringLiteral("edit_shape"), m_editModeAction},
-        {QStringLiteral("delete_shape"), m_deleteAction},
-        {QStringLiteral("duplicate_shape"), m_copyAction},
-        {QStringLiteral("copy_shape"), m_copyShapesAction},
-        {QStringLiteral("paste_shape"), m_pasteShapesAction},
-        {QStringLiteral("undo"), m_undoAction},
-        {QStringLiteral("undo_last_point"), m_undoLastPointAction},
-        {QStringLiteral("edit_label"), m_editLabelAction},
-        {QStringLiteral("toggle_keep_prev_mode"), m_keepPreviousAction},
-        {QStringLiteral("remove_selected_point"), m_removeSelectedPointAction},
-        {QStringLiteral("show_all_shapes"), m_showAllAction},
-        {QStringLiteral("hide_all_shapes"), m_hideAllAction},
-        {QStringLiteral("toggle_all_shapes"), m_toggleAllAction}};
-    for (auto it = shortcutActions.cbegin(); it != shortcutActions.cend(); ++it) {
-        const QString key = QStringLiteral("shortcuts.") + it.key();
-        if (!values.contains(key) || !it.value()) {
+    const QStringList configuredShortcutIds = {
+        QStringLiteral("close"), QStringLiteral("quit"), QStringLiteral("open"), QStringLiteral("open_dir"),
+        QStringLiteral("save"), QStringLiteral("save_as"), QStringLiteral("save_to"), QStringLiteral("delete_file"),
+        QStringLiteral("open_next"), QStringLiteral("open_prev"), QStringLiteral("zoom_in"), QStringLiteral("zoom_out"),
+        QStringLiteral("zoom_to_original"), QStringLiteral("fit_window"), QStringLiteral("fit_width"),
+        QStringLiteral("create_polygon"), QStringLiteral("create_rectangle"),
+        QStringLiteral("create_oriented_rectangle"), QStringLiteral("create_circle"), QStringLiteral("create_line"),
+        QStringLiteral("create_point"), QStringLiteral("create_linestrip"), QStringLiteral("create_points"),
+        QStringLiteral("create_mask"), QStringLiteral("create_ai_points"), QStringLiteral("create_ai_box"),
+        QStringLiteral("edit_shape"), QStringLiteral("delete_shape"), QStringLiteral("duplicate_shape"),
+        QStringLiteral("copy_shape"), QStringLiteral("paste_shape"), QStringLiteral("undo"),
+        QStringLiteral("edit_label"), QStringLiteral("toggle_keep_prev_mode"),
+        QStringLiteral("remove_selected_point"), QStringLiteral("show_all_shapes"),
+        QStringLiteral("hide_all_shapes"), QStringLiteral("toggle_all_shapes")};
+    for (const QString &commandId : configuredShortcutIds) {
+        const QString key = QStringLiteral("shortcuts.") + commandId;
+        if (!values.contains(key) || !m_shortcutRegistry.contains(commandId)) {
             continue;
         }
         QList<QKeySequence> shortcuts;
         for (const QString &shortcut : LabelMeConfig::stringList(values.value(key))) {
             const QKeySequence sequence(shortcut, QKeySequence::PortableText);
-            if (!sequence.isEmpty()) {
+            if (!sequence.isEmpty() && shortcuts.size() < 2) {
                 shortcuts.append(sequence);
             }
         }
-        it.value()->setShortcuts(shortcuts);
+        m_shortcutRegistry.setDefaults(commandId, shortcuts);
     }
+    if (!values.contains(QStringLiteral("shortcuts.undo")) &&
+        values.contains(QStringLiteral("shortcuts.undo_last_point"))) {
+        QList<QKeySequence> shortcuts;
+        for (const QString &shortcut : LabelMeConfig::stringList(values.value(QStringLiteral("shortcuts.undo_last_point")))) {
+            const QKeySequence sequence(shortcut, QKeySequence::PortableText);
+            if (!sequence.isEmpty() && shortcuts.size() < 2) {
+                shortcuts.append(sequence);
+            }
+        }
+        m_shortcutRegistry.setDefaults(QStringLiteral("undo"), shortcuts);
+    }
+    m_shortcutRegistry.loadOverrides(m_settings);
+    applyShortcutRegistry();
     if (values.contains(QStringLiteral("epsilon"))) {
         m_canvas->setEpsilon(values.value(QStringLiteral("epsilon")).toDouble());
     }
@@ -1694,6 +1730,8 @@ void MainWindow::createUi() {
 void MainWindow::createActions() {
     m_openAction = new QAction(this);
     m_openAction->setShortcut(QKeySequence::Open);
+    m_openYoloDatasetAction = new QAction(this);
+    m_openYoloDatasetAction->setObjectName(QStringLiteral("openYoloDatasetAction"));
     m_openDirAction = new QAction(this);
     m_openDirAction->setShortcut(QKeySequence("Ctrl+U"));
     m_openAnnotationAction = new QAction(this);
@@ -1768,6 +1806,14 @@ void MainWindow::createActions() {
     m_nextShapeAction = new QAction(this);
     m_nextShapeAction->setObjectName(QStringLiteral("nextShapeAction"));
     m_nextShapeAction->setShortcut(QKeySequence(QStringLiteral("E")));
+    m_prevLabelAction = new QAction(this);
+    m_prevLabelAction->setObjectName(QStringLiteral("prevLabelAction"));
+    m_prevLabelAction->setShortcut(QKeySequence(QStringLiteral("Z")));
+    m_nextLabelAction = new QAction(this);
+    m_nextLabelAction->setObjectName(QStringLiteral("nextLabelAction"));
+    m_nextLabelAction->setShortcut(QKeySequence(QStringLiteral("C")));
+    addAction(m_prevLabelAction);
+    addAction(m_nextLabelAction);
     m_deleteAction = new QAction(this);
     m_deleteAction->setShortcuts({QKeySequence(Qt::Key_Delete), QKeySequence(QStringLiteral("X"))});
     m_deleteAllShapesAction = new QAction(this);
@@ -1801,9 +1847,13 @@ void MainWindow::createActions() {
     m_deleteAnnotationAction->setObjectName(QStringLiteral("deleteAnnotationAction"));
     m_createModeAction = new QAction(this);
     m_createModeAction->setObjectName(QStringLiteral("createModeAction"));
-    m_createModeAction->setShortcuts({QKeySequence("W"), QKeySequence("Ctrl+R")});
+    m_createModeAction->setShortcut(QKeySequence("Ctrl+R"));
     m_createModeAction->setCheckable(true);
     m_createModeAction->setChecked(false);
+    m_repeatCreateAction = new QAction(this);
+    m_repeatCreateAction->setObjectName(QStringLiteral("repeatCreateAction"));
+    m_repeatCreateAction->setShortcut(QKeySequence(QStringLiteral("W")));
+    m_repeatCreateAction->setAutoRepeat(false);
     m_createPolygonModeAction = new QAction(this);
     m_createPolygonModeAction->setObjectName(QStringLiteral("createPolygonModeAction"));
     m_createPolygonModeAction->setShortcuts({QKeySequence(QStringLiteral("P")),
@@ -1982,12 +2032,170 @@ void MainWindow::createActions() {
     m_canvas->setFillDrawing(m_fillDrawingAction->isChecked());
     m_canvas->setSamplingMode(m_samplingModeAction->isChecked() ? Canvas::SamplingMode::Smooth : Canvas::SamplingMode::FastNearest);
     assignActionIcons();
+    initializeShortcutRegistry();
+}
+
+void MainWindow::registerShortcutCommand(const QString &commandId, const QString &category,
+                                         const QList<QAction *> &actions) {
+    if (actions.isEmpty() || !actions.first()) {
+        return;
+    }
+    if (!m_shortcutRegistry.addCommand({commandId, category, actions.first()->shortcuts()})) {
+        return;
+    }
+    m_shortcutActions.insert(commandId, actions);
+    for (QAction *action : actions) {
+        if (action) {
+            action->setProperty("shortcutCommandId", commandId);
+        }
+    }
+}
+
+void MainWindow::initializeShortcutRegistry() {
+    auto add = [this](const QString &id, const QString &category, QAction *action) {
+        registerShortcutCommand(id, category, {action});
+    };
+
+    add(QStringLiteral("open"), QStringLiteral("file"), m_openAction);
+    add(QStringLiteral("open_dir"), QStringLiteral("file"), m_openDirAction);
+    add(QStringLiteral("open_annotation"), QStringLiteral("file"), m_openAnnotationAction);
+    add(QStringLiteral("open_in_viewer"), QStringLiteral("file"), m_openWithImageViewerAction);
+    add(QStringLiteral("reveal_in_folder"), QStringLiteral("file"), m_openFileLocationAction);
+    add(QStringLiteral("close"), QStringLiteral("file"), m_closeAction);
+    add(QStringLiteral("quit"), QStringLiteral("file"), m_quitAction);
+    add(QStringLiteral("reset_all"), QStringLiteral("application"), m_resetAllAction);
+    add(QStringLiteral("reset_layout"), QStringLiteral("view"), m_resetLayoutAction);
+    add(QStringLiteral("save"), QStringLiteral("file"), m_saveAction);
+    add(QStringLiteral("save_as"), QStringLiteral("file"), m_saveAsAction);
+    add(QStringLiteral("save_to"), QStringLiteral("file"), m_changeSaveDirAction);
+    add(QStringLiteral("change_format"), QStringLiteral("annotation"), m_formatAction);
+    add(QStringLiteral("open_next"), QStringLiteral("navigation"), m_nextAction);
+    add(QStringLiteral("open_prev"), QStringLiteral("navigation"), m_prevAction);
+    add(QStringLiteral("open_next_copy"), QStringLiteral("navigation"), m_nextCopyAction);
+    add(QStringLiteral("open_prev_copy"), QStringLiteral("navigation"), m_prevCopyAction);
+    add(QStringLiteral("verify"), QStringLiteral("annotation"), m_verifyAction);
+    add(QStringLiteral("delete_image"), QStringLiteral("file"), m_deleteImageAction);
+    add(QStringLiteral("delete_file"), QStringLiteral("file"), m_deleteAnnotationAction);
+    add(QStringLiteral("settings"), QStringLiteral("application"), m_settingsAction);
+
+    add(QStringLiteral("edit_label"), QStringLiteral("edit"), m_editLabelAction);
+    registerShortcutCommand(QStringLiteral("undo"), QStringLiteral("edit"),
+                            {m_undoAction, m_undoLastPointAction});
+    add(QStringLiteral("redo"), QStringLiteral("edit"), m_redoAction);
+    add(QStringLiteral("previous_shape"), QStringLiteral("navigation"), m_prevShapeAction);
+    add(QStringLiteral("next_shape"), QStringLiteral("navigation"), m_nextShapeAction);
+    add(QStringLiteral("previous_label"), QStringLiteral("navigation"), m_prevLabelAction);
+    add(QStringLiteral("next_label"), QStringLiteral("navigation"), m_nextLabelAction);
+    add(QStringLiteral("delete_shape"), QStringLiteral("edit"), m_deleteAction);
+    add(QStringLiteral("delete_all_shapes"), QStringLiteral("edit"), m_deleteAllShapesAction);
+    add(QStringLiteral("duplicate_shape"), QStringLiteral("edit"), m_copyAction);
+    add(QStringLiteral("copy_shape"), QStringLiteral("edit"), m_copyShapesAction);
+    add(QStringLiteral("paste_shape"), QStringLiteral("edit"), m_pasteShapesAction);
+    add(QStringLiteral("remove_selected_point"), QStringLiteral("edit"), m_removeSelectedPointAction);
+    add(QStringLiteral("copy_previous"), QStringLiteral("edit"), m_copyPreviousAction);
+
+    add(QStringLiteral("create_rectangle"), QStringLiteral("mode"), m_createModeAction);
+    add(QStringLiteral("repeat_create"), QStringLiteral("mode"), m_repeatCreateAction);
+    add(QStringLiteral("create_polygon"), QStringLiteral("mode"), m_createPolygonModeAction);
+    add(QStringLiteral("create_point"), QStringLiteral("mode"), m_createPointModeAction);
+    add(QStringLiteral("create_points"), QStringLiteral("mode"), m_createPointsModeAction);
+    add(QStringLiteral("create_ai_points"), QStringLiteral("mode"), m_createAiPointsModeAction);
+    add(QStringLiteral("create_ai_box"), QStringLiteral("mode"), m_createAiBoxModeAction);
+    add(QStringLiteral("create_line"), QStringLiteral("mode"), m_createLineModeAction);
+    add(QStringLiteral("create_linestrip"), QStringLiteral("mode"), m_createLinestripModeAction);
+    add(QStringLiteral("create_circle"), QStringLiteral("mode"), m_createCircleModeAction);
+    add(QStringLiteral("create_oriented_rectangle"), QStringLiteral("mode"), m_createOrientedRectangleModeAction);
+    add(QStringLiteral("create_mask"), QStringLiteral("mode"), m_createMaskModeAction);
+    add(QStringLiteral("edit_mask"), QStringLiteral("mode"), m_maskEditAction);
+    add(QStringLiteral("edit_shape"), QStringLiteral("mode"), m_editModeAction);
+    add(QStringLiteral("view_mode"), QStringLiteral("mode"), m_viewModeAction);
+    add(QStringLiteral("editing_allowed"), QStringLiteral("mode"), m_editabilityAction);
+
+    add(QStringLiteral("advanced_mode"), QStringLiteral("view"), m_advancedModeAction);
+    add(QStringLiteral("show_file_dock"), QStringLiteral("view"), m_showFileDockAction);
+    add(QStringLiteral("show_label_dock"), QStringLiteral("view"), m_showLabelDockAction);
+    add(QStringLiteral("show_shape_dock"), QStringLiteral("view"), m_showShapeDockAction);
+    add(QStringLiteral("show_flag_dock"), QStringLiteral("view"), m_showFlagDockAction);
+    add(QStringLiteral("hide_all_shapes"), QStringLiteral("view"), m_hideAllAction);
+    add(QStringLiteral("show_all_shapes"), QStringLiteral("view"), m_showAllAction);
+    add(QStringLiteral("toggle_all_shapes"), QStringLiteral("view"), m_toggleAllAction);
+    add(QStringLiteral("zoom_in"), QStringLiteral("view"), m_zoomInAction);
+    add(QStringLiteral("zoom_out"), QStringLiteral("view"), m_zoomOutAction);
+    add(QStringLiteral("zoom_to_original"), QStringLiteral("view"), m_zoomOriginalAction);
+    add(QStringLiteral("fit_window"), QStringLiteral("view"), m_fitWindowAction);
+    add(QStringLiteral("fit_width"), QStringLiteral("view"), m_fitWidthAction);
+    add(QStringLiteral("brighten"), QStringLiteral("view"), m_brightenAction);
+    add(QStringLiteral("darken"), QStringLiteral("view"), m_darkenAction);
+    add(QStringLiteral("brightness_original"), QStringLiteral("view"), m_brightnessOriginalAction);
+    add(QStringLiteral("brightness_contrast"), QStringLiteral("view"), m_brightnessContrastAction);
+    add(QStringLiteral("draw_square"), QStringLiteral("annotation"), m_drawSquareAction);
+    add(QStringLiteral("fill_drawing"), QStringLiteral("view"), m_fillDrawingAction);
+    add(QStringLiteral("box_line_color"), QStringLiteral("view"), m_boxLineColorAction);
+    add(QStringLiteral("shape_line_color"), QStringLiteral("view"), m_shapeLineColorAction);
+    add(QStringLiteral("shape_fill_color"), QStringLiteral("view"), m_shapeFillColorAction);
+    add(QStringLiteral("mini_map"), QStringLiteral("view"), m_miniMapAction);
+    add(QStringLiteral("show_performance"), QStringLiteral("view"), m_showPerformanceAction);
+    add(QStringLiteral("sampling_mode"), QStringLiteral("view"), m_samplingModeAction);
+    add(QStringLiteral("thumbnail_mode"), QStringLiteral("view"), m_thumbnailModeAction);
+    add(QStringLiteral("auto_save"), QStringLiteral("annotation"), m_autoSaveAction);
+    add(QStringLiteral("toggle_keep_prev_mode"), QStringLiteral("annotation"), m_keepPreviousAction);
+    add(QStringLiteral("keep_previous_zoom"), QStringLiteral("view"), m_keepPreviousZoomAction);
+    add(QStringLiteral("keep_previous_brightness"), QStringLiteral("view"),
+        m_keepPreviousBrightnessContrastAction);
+    add(QStringLiteral("single_class"), QStringLiteral("annotation"), m_singleClassAction);
+    add(QStringLiteral("display_labels"), QStringLiteral("annotation"), m_displayLabelsAction);
+    add(QStringLiteral("embed_image_data"), QStringLiteral("annotation"), m_embedImageDataAction);
+    add(QStringLiteral("edit_label_flags"), QStringLiteral("annotation"), m_editLabelFlagsAction);
+    add(QStringLiteral("show_info"), QStringLiteral("help"), m_infoAction);
+    add(QStringLiteral("show_shortcuts"), QStringLiteral("help"), m_shortcutsAction);
+    add(QStringLiteral("open_tutorial"), QStringLiteral("help"), m_tutorialAction);
+
+    m_shortcutRegistry.loadOverrides(m_settings);
+    applyShortcutRegistry();
+}
+
+void MainWindow::applyShortcutRegistry() {
+    for (const ShortcutCommand &command : m_shortcutRegistry.commands()) {
+        const QList<QAction *> actions = m_shortcutActions.value(command.id);
+        for (QAction *action : actions) {
+            if (action) {
+                action->setShortcuts(command.shortcuts);
+            }
+        }
+    }
+    auto firstShortcutText = [](QAction *action) {
+        return action && !action->shortcuts().isEmpty()
+                   ? action->shortcuts().first().toString(QKeySequence::NativeText)
+                   : QStringLiteral("-");
+    };
+    if (m_footerViewShortcut) {
+        m_footerViewShortcut->setText(firstShortcutText(m_viewModeAction));
+    }
+    if (m_footerEditShortcut) {
+        const QString shortcut = firstShortcutText(m_editModeAction);
+        m_footerEditShortcut->setText(shortcut == QStringLiteral("-")
+                                          ? m_strings.get(QStringLiteral("footerEditMode"))
+                                          : shortcut);
+    }
+    if (m_footerCreateShortcut) {
+        m_footerCreateShortcut->setText(firstShortcutText(m_repeatCreateAction));
+    }
+    if (m_toolBar) {
+        refreshActionToolTips();
+    }
 }
 
 void MainWindow::createMenusAndToolbars() {
     m_fileMenu = menuBar()->addMenu(QString());
     m_fileMenu->setObjectName(QStringLiteral("fileMenu"));
-    m_fileMenu->addActions({m_openAction, m_openDirAction, m_changeSaveDirAction, m_openAnnotationAction});
+    m_fileMenu->addActions({m_openAction, m_openDirAction});
+    m_openMoreMenu = m_fileMenu->addMenu(QString());
+    m_openMoreMenu->setObjectName(QStringLiteral("openMoreMenu"));
+    m_openMoreMenu->addAction(m_openYoloDatasetAction);
+    m_onnxDetectionAction = m_openMoreMenu->addAction(QString());
+    m_onnxDetectionAction->setObjectName(QStringLiteral("onnxDetectionAction"));
+    connect(m_onnxDetectionAction, &QAction::triggered, this, &MainWindow::openOnnxDetection);
+    m_fileMenu->addActions({m_changeSaveDirAction, m_openAnnotationAction});
     m_recentFilesMenu = m_fileMenu->addMenu(QString());
     m_recentFilesMenu->setObjectName(QStringLiteral("recentFilesMenu"));
     m_recentDirsMenu = m_fileMenu->addMenu(QString());
@@ -2006,52 +2214,46 @@ void MainWindow::createMenusAndToolbars() {
 
     m_viewMenu = menuBar()->addMenu(QString());
     m_viewMenu->setObjectName(QStringLiteral("viewMenu"));
-    m_viewMenu->addActions({m_undoAction, m_undoLastPointAction, m_redoAction, m_copyShapesAction,
-                            m_pasteShapesAction, m_copyAction, m_deleteAction, m_deleteAllShapesAction});
-    m_viewMenu->addActions({m_prevShapeAction, m_nextShapeAction});
-    m_viewMenu->addAction(m_addPointToEdgeAction);
-    m_viewMenu->addAction(m_removeSelectedPointAction);
+    m_viewMenu->addActions({m_undoAction, m_redoAction});
     m_viewMenu->addSeparator();
-    m_viewMenu->addActions({m_showFlagDockAction, m_showLabelDockAction,
-                            m_showShapeDockAction, m_showFileDockAction});
-    m_viewMenu->addAction(m_resetLayoutAction);
+    const auto addViewSubmenu = [this](const QString &key, const QList<QAction *> &actions) {
+        QMenu *menu = m_viewMenu->addMenu(m_strings.get(key));
+        menu->setObjectName(key);
+        menu->setProperty("translationKey", key);
+        menu->addActions(actions);
+        return menu;
+    };
+    addViewSubmenu(QStringLiteral("menu_annotationEdit"),
+                   {m_undoLastPointAction, m_copyShapesAction, m_pasteShapesAction, m_copyAction,
+                    m_deleteAction, m_deleteAllShapesAction, m_prevShapeAction, m_nextShapeAction,
+                    m_addPointToEdgeAction, m_removeSelectedPointAction});
+    addViewSubmenu(QStringLiteral("menu_createShape"),
+                   {m_repeatCreateAction, m_createModeAction, m_createPolygonModeAction, m_createPointModeAction,
+                    m_createPointsModeAction, m_createLineModeAction, m_createLinestripModeAction,
+                    m_createCircleModeAction, m_createOrientedRectangleModeAction, m_createMaskModeAction,
+                    m_createAiPointsModeAction, m_createAiBoxModeAction});
+    addViewSubmenu(QStringLiteral("menu_annotationMode"),
+                   {m_advancedModeAction, m_editModeAction, m_viewModeAction, m_maskEditAction,
+                    m_editabilityAction, m_drawSquareAction});
+    addViewSubmenu(QStringLiteral("menu_annotationOptions"),
+                   {m_autoSaveAction, m_keepPreviousAction, m_singleClassAction, m_editLabelFlagsAction});
+    addViewSubmenu(QStringLiteral("menu_annotationDisplay"),
+                   {m_displayLabelsAction, m_fillDrawingAction, m_boxLineColorAction,
+                    m_hideAllAction, m_showAllAction, m_toggleAllAction});
     m_viewMenu->addSeparator();
-    m_viewMenu->addAction(m_advancedModeAction);
-    m_viewMenu->addAction(m_createModeAction);
-    m_viewMenu->addAction(m_createPolygonModeAction);
-    m_viewMenu->addAction(m_createPointModeAction);
-    m_viewMenu->addAction(m_createPointsModeAction);
-    m_viewMenu->addAction(m_createAiPointsModeAction);
-    m_viewMenu->addAction(m_createAiBoxModeAction);
-    m_viewMenu->addAction(m_createLineModeAction);
-    m_viewMenu->addAction(m_createLinestripModeAction);
-    m_viewMenu->addAction(m_createCircleModeAction);
-    m_viewMenu->addAction(m_createOrientedRectangleModeAction);
-    m_viewMenu->addAction(m_createMaskModeAction);
-    m_viewMenu->addAction(m_maskEditAction);
-    m_viewMenu->addAction(m_editModeAction);
-    m_viewMenu->addAction(m_viewModeAction);
-    m_viewMenu->addAction(m_editabilityAction);
-    m_viewMenu->addAction(m_autoSaveAction);
-    m_viewMenu->addAction(m_keepPreviousAction);
-    m_viewMenu->addAction(m_keepPreviousZoomAction);
-    m_viewMenu->addAction(m_singleClassAction);
-    m_viewMenu->addAction(m_displayLabelsAction);
-    m_viewMenu->addAction(m_editLabelFlagsAction);
-    m_viewMenu->addAction(m_drawSquareAction);
-    m_viewMenu->addAction(m_fillDrawingAction);
-    m_viewMenu->addAction(m_boxLineColorAction);
+    addViewSubmenu(QStringLiteral("menu_zoom"),
+                   {m_zoomInAction, m_zoomOutAction, m_zoomOriginalAction, m_fitWindowAction,
+                    m_fitWidthAction, m_keepPreviousZoomAction});
+    addViewSubmenu(QStringLiteral("menu_imageAdjustments"),
+                   {m_darkenAction, m_brightenAction, m_brightnessOriginalAction,
+                    m_brightnessContrastAction, m_keepPreviousBrightnessContrastAction});
+    QMenu *panelsMenu = addViewSubmenu(QStringLiteral("menu_panelsLayout"),
+                   {m_showFlagDockAction, m_showLabelDockAction, m_showShapeDockAction,
+                    m_showFileDockAction, m_miniMapAction, m_showPerformanceAction});
+    panelsMenu->addSeparator();
+    panelsMenu->addAction(m_resetLayoutAction);
+    addViewSubmenu(QStringLiteral("menu_browsing"), {m_samplingModeAction, m_thumbnailModeAction});
     m_viewMenu->addSeparator();
-    m_viewMenu->addActions({m_hideAllAction, m_showAllAction, m_toggleAllAction});
-    m_viewMenu->addSeparator();
-    m_viewMenu->addActions({m_zoomInAction, m_zoomOutAction, m_zoomOriginalAction});
-    m_viewMenu->addActions({m_fitWindowAction, m_fitWidthAction});
-    m_viewMenu->addActions({m_miniMapAction, m_showPerformanceAction, m_samplingModeAction, m_thumbnailModeAction});
-    m_viewMenu->addSeparator();
-    m_viewMenu->addActions({m_darkenAction, m_brightenAction, m_brightnessOriginalAction});
-    m_viewMenu->addAction(m_brightnessContrastAction);
-    m_viewMenu->addAction(m_keepPreviousBrightnessContrastAction);
-
     m_languageMenu = m_viewMenu->addMenu(QString());
     QHash<QString, QString> languageNames{{"en", "English"}, {"zh-CN", QString::fromUtf8("简体中文")},
                                           {"zh-TW", QString::fromUtf8("繁體中文")}, {"ja-JP", QString::fromUtf8("日本語")}};
@@ -2164,7 +2366,7 @@ void MainWindow::createFooterControls() {
         const QString mode = m_footerModeCombo->itemData(index).toString();
         if (mode == QStringLiteral("view")) setViewMode();
         else if (mode == QStringLiteral("edit")) setEditMode();
-        else if (mode == QStringLiteral("create")) setCreateMode();
+        else if (mode == QStringLiteral("create")) repeatCreateMode();
     });
 
     auto makeShortcutButton = [this](const QString &objectName, const QString &text, const QString &tooltip) {
@@ -2186,7 +2388,7 @@ void MainWindow::createFooterControls() {
                                                 m_strings.get(QStringLiteral("footerCreateTooltip")));
     connect(m_footerViewShortcut, &QToolButton::clicked, this, &MainWindow::setViewMode);
     connect(m_footerEditShortcut, &QToolButton::clicked, this, &MainWindow::setEditMode);
-    connect(m_footerCreateShortcut, &QToolButton::clicked, this, &MainWindow::setCreateMode);
+    connect(m_footerCreateShortcut, &QToolButton::clicked, this, &MainWindow::repeatCreateMode);
 
     auto *modePanel = new QWidget(this);
     modePanel->setObjectName(QStringLiteral("footerModePanel"));
@@ -2292,6 +2494,7 @@ void MainWindow::applyNativeWindowChrome() {
 void MainWindow::connectSignals() {
     connect(m_openAction, &QAction::triggered, this, &MainWindow::openFile);
     connect(m_openDirAction, &QAction::triggered, this, &MainWindow::openDir);
+    connect(m_openYoloDatasetAction, &QAction::triggered, this, &MainWindow::openYoloDatasetDialog);
     connect(m_openAnnotationAction, &QAction::triggered, this, &MainWindow::openAnnotationDialog);
     connect(m_openWithImageViewerAction, &QAction::triggered, this, &MainWindow::openCurrentImageWithViewer);
     connect(m_openFileLocationAction, &QAction::triggered, this, &MainWindow::revealCurrentImageInFolder);
@@ -2331,6 +2534,8 @@ void MainWindow::connectSignals() {
     connect(m_redoAction, &QAction::triggered, this, &MainWindow::redoShapeOperation);
     connect(m_prevShapeAction, &QAction::triggered, this, [this]() { selectAdjacentShape(-1); });
     connect(m_nextShapeAction, &QAction::triggered, this, [this]() { selectAdjacentShape(1); });
+    connect(m_prevLabelAction, &QAction::triggered, this, [this]() { selectAdjacentLabel(-1); });
+    connect(m_nextLabelAction, &QAction::triggered, this, [this]() { selectAdjacentLabel(1); });
     connect(m_deleteAction, &QAction::triggered, this, &MainWindow::deleteCurrentShape);
     connect(m_deleteAllShapesAction, &QAction::triggered, this, &MainWindow::deleteAllShapes);
     connect(m_copyAction, &QAction::triggered, this, &MainWindow::copyCurrentShape);
@@ -2352,6 +2557,7 @@ void MainWindow::connectSignals() {
     connect(m_deleteImageAction, &QAction::triggered, this, &MainWindow::deleteCurrentImage);
     connect(m_deleteAnnotationAction, &QAction::triggered, this, &MainWindow::deleteCurrentAnnotationFile);
     connect(m_createModeAction, &QAction::triggered, this, &MainWindow::setCreateMode);
+    connect(m_repeatCreateAction, &QAction::triggered, this, &MainWindow::repeatCreateMode);
     connect(m_createPolygonModeAction, &QAction::triggered, this, &MainWindow::setPolygonCreateMode);
     connect(m_createPointModeAction, &QAction::triggered, this, &MainWindow::setPointCreateMode);
     connect(m_createPointsModeAction, &QAction::triggered, this, &MainWindow::setPointsCreateMode);
@@ -2493,6 +2699,7 @@ void MainWindow::connectSignals() {
     connect(m_canvas, &Canvas::scaleValueChanged, this, [this](double) { syncZoomWidget(); });
     connect(m_canvas, &Canvas::frameRendered, this, &MainWindow::onCanvasFrameRendered);
     connect(m_canvas, &Canvas::editModeRequested, this, &MainWindow::setEditMode);
+    connect(m_canvas, &Canvas::viewModeRequested, this, &MainWindow::setViewMode);
     connect(m_canvas, &Canvas::shapeCreated, this, &MainWindow::onCanvasShapeCreated);
     connect(m_canvas, &Canvas::previousShapeRequested, this, [this]() { selectAdjacentShape(-1); });
     connect(m_canvas, &Canvas::nextShapeRequested, this, [this]() { selectAdjacentShape(1); });
@@ -2533,6 +2740,10 @@ void MainWindow::connectSignals() {
         }
     });
     m_canvas->installEventFilter(this);
+    m_fileList->viewport()->installEventFilter(this);
+    connect(m_fileList->verticalScrollBar(), &QScrollBar::valueChanged, this, [this]() {
+        loadVisibleFileThumbnails();
+    });
     m_labelList->installEventFilter(this);
     m_uniqueLabelList->installEventFilter(this);
     connect(m_performanceMonitor, &PerformanceMonitor::performanceUpdated, this, [this](const QString &text) {
@@ -2550,6 +2761,8 @@ void MainWindow::connectSignals() {
         // cancelled label popup can restore the exact pre-creation state.
         if (drawing) {
             m_shapeEditDirtyBefore = m_dirty;
+        } else {
+            scheduleAutoSave();
         }
         refreshActions();
     });
@@ -2571,7 +2784,7 @@ void MainWindow::connectSignals() {
     });
     connect(m_fileSearchEdit, &QLineEdit::textChanged, this, [this](const QString &text) {
         m_fileNameFilter = text.trimmed();
-        populateFileList();
+        populateFileList(false);
     });
     connect(m_filterCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onFilterChanged);
     connect(m_aiModelCombo, &QComboBox::currentTextChanged, this, [this]() {
@@ -2600,7 +2813,7 @@ void MainWindow::connectSignals() {
 void MainWindow::loadSettings() {
     QString savedLanguage = m_settings.value("language").toString();
     if (savedLanguage.isEmpty()) {
-        savedLanguage = StringBundle::systemLanguage();
+        savedLanguage = QStringLiteral("zh-CN");
         m_settings.setValue("language", savedLanguage);
     }
     m_strings = StringBundle(savedLanguage);
@@ -2633,6 +2846,8 @@ void MainWindow::saveLastFileByDir() {
 }
 
 void MainWindow::saveSettings() {
+    m_settings.setValue("activeYoloDatasetConfig", m_yoloDataset.configPath);
+    m_settings.setValue("activeYoloDatasetImage", m_yoloDataset.isOpen() ? m_filePath : QString());
     m_settings.setValue("language", m_strings.language());
     m_settings.setValue("savedir", m_saveDir);
     m_settings.setValue("labelFileFormat", static_cast<int>(m_format));
@@ -2871,6 +3086,7 @@ void MainWindow::applyShapeLabelColors(Shape *shape) const {
 }
 
 bool MainWindow::validateLabel(const QString &label) const {
+    if (m_yoloDataset.isOpen()) return m_yoloDataset.classes.contains(label.trimmed());
     if (m_validateLabelPolicy.isEmpty()) {
         return true;
     }
@@ -2892,6 +3108,13 @@ void MainWindow::rememberLastUsedLabel(const QString &label) {
 }
 
 bool MainWindow::loadImage(const QString &path) {
+    // Check stale queue entries before asking to save or discard current edits.
+    if (m_imageList.contains(path) && !QFileInfo(path).isFile()) {
+        QMessageBox::warning(this, QStringLiteral("labelImgCpp"),
+                             m_strings.get(QStringLiteral("cannotOpen")).arg(path));
+        reloadImageQueue();
+        return false;
+    }
     if (!maybeSave()) return false;
     const bool copyPreviousOnNavigation = m_copyPreviousNavigation;
     const bool keepPrevious = (m_keepPreviousAction && m_keepPreviousAction->isChecked()) ||
@@ -2919,8 +3142,11 @@ bool MainWindow::loadImage(const QString &path) {
     if (image.isNull()) {
         QMessageBox::warning(this, QStringLiteral("labelImgCpp"),
                              m_strings.get(QStringLiteral("cannotOpen")).arg(path));
+        // Also handle deletion between the initial check and image decoding.
+        if (m_imageList.contains(path) && !QFileInfo(path).isFile()) reloadImageQueue();
         return false;
     }
+    if (m_yoloDataset.isOpen() && m_yoloDataset.annotationPath(path).isEmpty()) leaveYoloDataset();
     m_filePath = QFileInfo(path).absoluteFilePath();
     m_annotationPathOverride.clear();
     m_hasAnnotationPathOverride = false;
@@ -2946,7 +3172,7 @@ bool MainWindow::loadImage(const QString &path) {
     QString annotationLoadError;
     loadAnnotationsForCurrentImage(&annotationLoadError);
     m_annotationLoadFailed = !annotationLoadError.isEmpty();
-    const bool carriedPrevious = keepPrevious && !previousShapes.isEmpty() && m_canvas->shapes().isEmpty();
+    const bool carriedPrevious = !m_yoloDataset.isOpen() && keepPrevious && !previousShapes.isEmpty() && m_canvas->shapes().isEmpty();
     if (carriedPrevious) {
         m_canvas->setShapes(previousShapes);
         statusBar()->showMessage(m_strings.get(QStringLiteral("keepPreviousAnnotationStatus")), 3000);
@@ -3036,6 +3262,7 @@ bool MainWindow::loadLabelMeWithRepair(const QString &path, AnnotationDocument *
 }
 
 bool MainWindow::loadAnnotation(const QString &path) {
+    if (m_yoloDataset.isOpen()) return false;
     if (m_filePath.isEmpty() || path.isEmpty()) return false;
     const auto fail = [this, &path](const QString &detail) {
         statusBar()->showMessage(m_strings.get(QStringLiteral("failedLoad")).arg(path, detail), 8000);
@@ -3163,6 +3390,7 @@ bool MainWindow::loadStandaloneLabelMe(const QString &path) {
                                          : annotationInfo.dir().filePath(doc.imagePath))
                                   : resolvedImagePath;
 
+    leaveYoloDataset();
     setFormat(SaveFormat::LabelMe);
     m_filePath = QFileInfo(imagePath).absoluteFilePath();
     m_annotationPathOverride = annotationInfo.absoluteFilePath();
@@ -3217,27 +3445,55 @@ bool MainWindow::loadStandaloneLabelMe(const QString &path) {
     return true;
 }
 
-AnnotationDocument MainWindow::annotationDocumentForImage(const QString &imagePath, const QSize &imageSize,
-                                                          SaveFormat *detectedFormat,
-                                                          QString *errorMessage) const {
+AnnotationDocument MainWindow::readAnnotationForImage(const QString &imagePath, const QSize &imageSize,
+                                         const QString &saveDir, const QString &outputFilePath,
+                                         SaveFormat format, SaveFormat *detectedFormat,
+                                         QString *errorMessage, bool previewOnly, const YoloDataset &dataset) {
+    const auto readLabelMe = [previewOnly](const QString &path, AnnotationDocument *document, QString *error) {
+        if (!previewOnly) return AnnotationIO::loadLabelMe(path, document, error);
+        // Indexing and thumbnails only need metadata. Actual annotation loading
+        // still performs full imageData validation in AnnotationIO::loadLabelMe.
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) return false;
+        const QJsonDocument json = QJsonDocument::fromJson(file.readAll());
+        if (!json.isObject() || !json.object().value("shapes").isArray()) return false;
+        const QJsonObject root = json.object();
+        document->imagePath = root.value("imagePath").toString();
+        document->imageSize = QSize(root.value("imageWidth").toInt(), root.value("imageHeight").toInt());
+        document->shapes.clear();
+        for (const QJsonValue &value : root.value("shapes").toArray()) {
+            Shape shape;
+            if (value.isObject() && shapeFromClipboardJson(value.toObject(), &shape)) document->shapes.append(shape);
+        }
+        return true;
+    };
     if (errorMessage) {
         errorMessage->clear();
     }
     AnnotationDocument doc;
     if (detectedFormat) {
-        *detectedFormat = m_format;
+        *detectedFormat = format;
     }
     doc.imagePath = imagePath;
     doc.imageSize = imageSize;
-    if (m_format == SaveFormat::LabelMe && !m_outputFilePath.isEmpty()) {
-        const QFileInfo outputInfo(m_outputFilePath);
+    if (dataset.isOpen()) {
+        const QString labelPath = dataset.annotationPath(imagePath);
+        if (detectedFormat) *detectedFormat = SaveFormat::Yolo;
+        if (labelPath.isEmpty() || (QFileInfo::exists(labelPath) &&
+            !AnnotationIO::loadYoloWithClasses(labelPath, imageSize, &doc, dataset.classes))) {
+            if (errorMessage) *errorMessage = QStringLiteral("%1: invalid YOLO detection annotation").arg(labelPath);
+        }
+        return doc;
+    }
+    if (format == SaveFormat::LabelMe && !outputFilePath.isEmpty()) {
+        const QFileInfo outputInfo(outputFilePath);
         if (outputInfo.exists()) {
             QString labelMeError;
             AnnotationDocument fixedDocument;
-            if (!AnnotationIO::loadLabelMe(m_outputFilePath, &fixedDocument, &labelMeError)) {
+            if (!readLabelMe(outputFilePath, &fixedDocument, &labelMeError)) {
                 if (errorMessage) {
                     *errorMessage = QStringLiteral("%1: %2")
-                                        .arg(m_outputFilePath,
+                                        .arg(outputFilePath,
                                              labelMeError.isEmpty()
                                                  ? QStringLiteral("invalid LabelMe annotation")
                                                  : labelMeError);
@@ -3267,8 +3523,8 @@ AnnotationDocument MainWindow::annotationDocumentForImage(const QString &imagePa
     }
 
     QStringList dirs;
-    if (!m_saveDir.isEmpty()) {
-        dirs.append(m_saveDir);
+    if (!saveDir.isEmpty()) {
+        dirs.append(saveDir);
     }
     dirs.append(QFileInfo(imagePath).absolutePath());
     dirs.removeDuplicates();
@@ -3296,7 +3552,7 @@ AnnotationDocument MainWindow::annotationDocumentForImage(const QString &imagePa
         const QString jsonPath = base + ".json";
         if (QFileInfo::exists(jsonPath)) {
             QString labelMeError;
-            if (!AnnotationIO::loadLabelMe(jsonPath, &doc, &labelMeError)) {
+            if (!readLabelMe(jsonPath, &doc, &labelMeError)) {
                 if (AnnotationIO::loadCreateMl(jsonPath, imagePath, &doc) && detectedFormat) {
                     *detectedFormat = SaveFormat::CreateMl;
                 } else if (errorMessage) {
@@ -3316,6 +3572,13 @@ AnnotationDocument MainWindow::annotationDocumentForImage(const QString &imagePa
         doc.imageSize = imageSize;
     }
     return doc;
+}
+
+AnnotationDocument MainWindow::annotationDocumentForImage(const QString &imagePath, const QSize &imageSize,
+                                                          SaveFormat *detectedFormat,
+                                                          QString *errorMessage) const {
+    return readAnnotationForImage(imagePath, imageSize, m_saveDir, m_outputFilePath,
+                                  m_format, detectedFormat, errorMessage, false, m_yoloDataset);
 }
 
 void MainWindow::loadAnnotationsForCurrentImage(QString *errorMessage) {
@@ -3440,12 +3703,14 @@ void MainWindow::syncShapeOrderFromLabelList() {
     setDirty(true);
 }
 
-void MainWindow::populateFileList() {
+void MainWindow::populateFileList(bool reloadMetadata) {
     if (!m_fileList) {
         return;
     }
 
-    rebuildFileLabelFilterMenu();
+    rebuildFileLabelFilterMenu(reloadMetadata);
+    const QSignalBlocker listBlocker(m_fileList);
+    m_fileList->setUpdatesEnabled(false);
     const bool thumbnailMode = m_thumbnailModeAction && m_thumbnailModeAction->isChecked();
     QRegularExpression fileSearchPattern;
     bool fileSearchPatternValid = true;
@@ -3454,6 +3719,10 @@ void MainWindow::populateFileList() {
                                                 QRegularExpression::CaseInsensitiveOption);
         fileSearchPatternValid = fileSearchPattern.isValid();
     }
+    ++m_thumbnailGeneration;
+    if (reloadMetadata) m_thumbnailCache.clear();
+    m_fileItems.clear();
+    m_displayedThumbnails.clear();
     m_fileList->clear();
     m_fileList->setViewMode(QListView::ListMode);
     m_fileList->setMovement(QListView::Static);
@@ -3469,24 +3738,25 @@ void MainWindow::populateFileList() {
             !fileSearchPattern.match(path).hasMatch()) {
             continue;
         }
-        if (!m_fileLabelFilter.isEmpty() && !labelsForImage(path).contains(m_fileLabelFilter)) {
+        if (!m_fileLabelFilter.isEmpty() && !m_fileLabels.value(path).contains(m_fileLabelFilter)) {
             continue;
         }
         auto *item = new QListWidgetItem(path);
         item->setToolTip(path);
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-        item->setCheckState(hasAnnotationForImage(path) ? Qt::Checked : Qt::Unchecked);
+        item->setCheckState(m_annotatedFiles.contains(path) ? Qt::Checked : Qt::Unchecked);
         item->setSizeHint(thumbnailMode ? QSize(0, 64) : QSize(0, 22));
-        if (thumbnailMode) {
-            item->setIcon(fileThumbnailIcon(path));
-        }
         m_fileList->addItem(item);
+        m_fileItems.insert(path, item);
     }
     refreshFileListSelection();
     updateFileDockTitle();
+    m_fileList->setUpdatesEnabled(true);
+    if (thumbnailMode) QTimer::singleShot(0, this, &MainWindow::loadVisibleFileThumbnails);
 }
 
-QIcon MainWindow::fileThumbnailIcon(const QString &path) const {
+QImage MainWindow::readFileThumbnail(const QString &path, const QString &saveDir,
+                         const QString &outputFilePath, SaveFormat format, const YoloDataset &dataset) {
     QSize sourceSize;
     const QImage image = ImageIO::readPreview(path, 512, &sourceSize);
     if (image.isNull()) {
@@ -3501,14 +3771,15 @@ QIcon MainWindow::fileThumbnailIcon(const QString &path) const {
     const QRect targetRect(QPoint((iconSize.width() - scaledSize.width()) / 2,
                                   (iconSize.height() - scaledSize.height()) / 2),
                            scaledSize);
-    QPixmap thumbnail(iconSize);
+    QImage thumbnail(iconSize, QImage::Format_RGB32);
     thumbnail.fill(QColor(250, 250, 250));
 
     QPainter painter(&thumbnail);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
     painter.drawImage(targetRect, image);
 
-    const AnnotationDocument doc = annotationDocumentForImage(path, sourceSize);
+    const AnnotationDocument doc = readAnnotationForImage(path, sourceSize, saveDir, outputFilePath,
+                                                         format, nullptr, nullptr, true, dataset);
     if (!doc.imageSize.isEmpty()) {
         const double xScale = static_cast<double>(targetRect.width()) / doc.imageSize.width();
         const double yScale = static_cast<double>(targetRect.height()) / doc.imageSize.height();
@@ -3523,19 +3794,73 @@ QIcon MainWindow::fileThumbnailIcon(const QString &path) const {
                                     box.height() * yScale));
         }
     }
-    return QIcon(thumbnail);
+    return thumbnail;
+}
+
+void MainWindow::loadVisibleFileThumbnails() {
+    if (m_thumbnailLoading || !m_fileList || !m_thumbnailModeAction->isChecked() ||
+        !m_fileList->isVisible() || m_fileList->count() == 0) return;
+    const QRect viewport = m_fileList->viewport()->rect();
+    int first = -1;
+    for (int y = 0; y < qMin(80, viewport.height()) && first < 0; ++y) {
+        first = m_fileList->indexAt(QPoint(viewport.width() / 2, y)).row();
+    }
+    if (first < 0) return;
+    QSet<QString> visiblePaths;
+    for (int row = first; row < m_fileList->count(); ++row) {
+        auto *item = m_fileList->item(row);
+        if (m_fileList->visualItemRect(item).top() > viewport.bottom() + 64) break;
+        visiblePaths.insert(item->text());
+    }
+    // QListWidgetItem keeps a shared copy of its icon. Clear offscreen copies
+    // too, otherwise visiting every row defeats the bounded thumbnail cache.
+    for (const QString &path : std::as_const(m_displayedThumbnails)) {
+        if (!visiblePaths.contains(path)) {
+            if (auto *item = m_fileItems.value(path)) item->setIcon(QIcon());
+        }
+    }
+    m_displayedThumbnails = visiblePaths;
+    for (int row = first; row < m_fileList->count(); ++row) {
+        QListWidgetItem *item = m_fileList->item(row);
+        if (m_fileList->visualItemRect(item).top() > viewport.bottom() + 64) break;
+        const QString path = item->text();
+        if (QIcon *cached = m_thumbnailCache.object(path)) {
+            item->setIcon(*cached);
+            continue;
+        }
+        m_thumbnailLoading = true;
+        const quint64 generation = m_thumbnailGeneration;
+        const QString saveDir = m_saveDir;
+        const QString outputFilePath = m_outputFilePath;
+        const SaveFormat format = m_format;
+        const YoloDataset dataset = m_yoloDataset;
+        auto *watcher = new QFutureWatcher<QImage>(this);
+        connect(watcher, &QFutureWatcher<QImage>::finished, this, [this, watcher, path, generation]() {
+            const QImage image = watcher->result();
+            watcher->deleteLater();
+            m_thumbnailLoading = false;
+            if (generation == m_thumbnailGeneration) {
+                const QIcon icon = image.isNull() ? QIcon() : QIcon(QPixmap::fromImage(image));
+                // Cache failures too: a corrupt image must not start an endless decode loop.
+                m_thumbnailCache.insert(path, new QIcon(icon));
+                if (QListWidgetItem *item = m_fileItems.value(path)) {
+                    if (m_fileList->visualItemRect(item).intersects(m_fileList->viewport()->rect())) item->setIcon(icon);
+                }
+            }
+            QTimer::singleShot(0, this, &MainWindow::loadVisibleFileThumbnails);
+        });
+        watcher->setFuture(QtConcurrent::run(&m_thumbnailPool, [path, saveDir, outputFilePath, format, dataset]() {
+            return readFileThumbnail(path, saveDir, outputFilePath, format, dataset);
+        }));
+        break; // One decoder and only visible work: no directory-sized queue or memory spike.
+    }
 }
 
 QStringList MainWindow::labelsForImage(const QString &path) const {
-    QImageReader reader(path);
-    reader.setAutoTransform(true);
-    QSize imageSize = reader.size();
-    if (!imageSize.isValid() || imageSize.isEmpty()) {
-        const QImage image = readImageWithAutoTransform(path);
-        imageSize = image.size();
-    }
-
-    const AnnotationDocument doc = annotationDocumentForImage(path, imageSize);
+    // Label extraction does not need image pixels or actual box coordinates.
+    // A valid unit size lets YOLO decode labels without opening the image.
+    const AnnotationDocument doc = readAnnotationForImage(path, QSize(1, 1), m_saveDir,
+                                                         m_outputFilePath, m_format, nullptr, nullptr, true, m_yoloDataset);
     QSet<QString> uniqueLabels;
     for (const Shape &shape : doc.shapes) {
         const QString label = shape.label.trimmed();
@@ -3548,14 +3873,51 @@ QStringList MainWindow::labelsForImage(const QString &path) const {
     return labels;
 }
 
-void MainWindow::rebuildFileLabelFilterMenu() {
+void MainWindow::rebuildFileLabelFilterMenu(bool reloadLabels) {
     if (!m_fileLabelFilterMenu) {
         return;
     }
 
+    if (reloadLabels) {
+        m_fileLabels.clear();
+        m_annotatedFiles.clear();
+        // Enumerate sidecars once per directory instead of issuing three file
+        // existence probes per image (especially costly on large/network folders).
+        const auto pathKey = [](const QString &path) {
+#ifdef Q_OS_WIN
+            return path.toCaseFolded();
+#else
+            return path;
+#endif
+        };
+        QSet<QString> directories;
+        for (const QString &path : m_imageList) {
+            directories.insert(QFileInfo(m_yoloDataset.isOpen() ? m_yoloDataset.annotationPath(path) : path).absolutePath());
+        }
+        const QString saveDirectory = m_saveDir.isEmpty() ? QString() : QFileInfo(m_saveDir).absoluteFilePath();
+        if (!saveDirectory.isEmpty()) directories.insert(saveDirectory);
+        QHash<QString, QSet<QString>> annotationNames;
+        for (const QString &directory : directories) {
+            QSet<QString> names;
+            const QStringList sidecars = QDir(directory).entryList(
+                m_yoloDataset.isOpen() ? QStringList{"*.txt"} : QStringList{"*.xml", "*.txt", "*.json"}, QDir::Files, QDir::NoSort);
+            for (const QString &name : sidecars) names.insert(pathKey(QFileInfo(name).completeBaseName()));
+            annotationNames.insert(directory, names);
+        }
+        for (const QString &path : m_imageList) {
+            const QFileInfo info(path);
+            const QString base = pathKey(info.completeBaseName());
+            const bool annotated = m_yoloDataset.isOpen()
+                ? annotationNames.value(QFileInfo(m_yoloDataset.annotationPath(path)).absolutePath()).contains(base)
+                : annotationNames.value(info.absolutePath()).contains(base) ||
+                  (!saveDirectory.isEmpty() && annotationNames.value(saveDirectory).contains(base));
+            if (annotated) m_annotatedFiles.insert(path);
+            if (annotated || !m_outputFilePath.isEmpty()) m_fileLabels.insert(path, labelsForImage(path));
+        }
+    }
     QHash<QString, int> labelCounts;
     for (const QString &path : m_imageList) {
-        const QStringList labels = labelsForImage(path);
+        const QStringList labels = m_fileLabels.value(path);
         for (const QString &label : labels) {
             labelCounts[label] += 1;
         }
@@ -3572,7 +3934,7 @@ void MainWindow::rebuildFileLabelFilterMenu() {
         action->setData(label);
         connect(action, &QAction::triggered, this, [this, label]() {
             m_fileLabelFilter = label;
-            populateFileList();
+            populateFileList(false);
         });
     };
 
@@ -3585,6 +3947,58 @@ void MainWindow::rebuildFileLabelFilterMenu() {
     for (const QString &label : labels) {
         addFilterAction(label, QStringLiteral("%1 (%2)").arg(label).arg(labelCounts.value(label)));
     }
+}
+
+void MainWindow::refreshSavedFileItem() {
+    if (!m_fileList || m_imageList.isEmpty()) return;
+    // Saving one annotation must not decode every image in the directory.
+    ++m_thumbnailGeneration;
+    m_thumbnailCache.remove(m_filePath);
+    m_fileLabels.insert(m_filePath, labelsForImage(m_filePath));
+    if (hasAnnotationForImage(m_filePath)) m_annotatedFiles.insert(m_filePath);
+    else m_annotatedFiles.remove(m_filePath);
+    const QString oldFilter = m_fileLabelFilter;
+    rebuildFileLabelFilterMenu(false);
+    if (oldFilter != m_fileLabelFilter) {
+        // The last occurrence of the selected label was removed; restore all files.
+        populateFileList();
+        return;
+    }
+    const auto items = m_fileList->findItems(m_filePath, Qt::MatchExactly);
+    const QRegularExpression pattern(m_fileNameFilter, QRegularExpression::CaseInsensitiveOption);
+    const bool matches = (m_fileLabelFilter.isEmpty() || m_fileLabels.value(m_filePath).contains(m_fileLabelFilter)) &&
+                         (m_fileNameFilter.isEmpty() || !pattern.isValid() || pattern.match(m_filePath).hasMatch());
+    if (!matches) {
+        m_fileItems.remove(m_filePath);
+        for (QListWidgetItem *item : items) delete m_fileList->takeItem(m_fileList->row(item));
+        updateFileDockTitle();
+        return;
+    }
+    QListWidgetItem *item = items.isEmpty() ? nullptr : items.first();
+    const bool newItem = !item;
+    const bool thumbnails = m_thumbnailModeAction && m_thumbnailModeAction->isChecked();
+    if (!item) {
+        QSet<QString> preceding;
+        for (const QString &path : m_imageList) {
+            if (path == m_filePath) break;
+            preceding.insert(path);
+        }
+        int row = 0;
+        while (row < m_fileList->count() && preceding.contains(m_fileList->item(row)->text())) ++row;
+        item = new QListWidgetItem(m_filePath);
+        item->setToolTip(m_filePath);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setSizeHint(thumbnails ? QSize(0, 64) : QSize(0, 22));
+        m_fileList->insertItem(row, item);
+    }
+    item->setCheckState(hasAnnotationForImage(m_filePath) ? Qt::Checked : Qt::Unchecked);
+    m_fileItems.insert(m_filePath, item);
+    if (thumbnails) {
+        item->setIcon(QIcon());
+        loadVisibleFileThumbnails();
+    }
+    if (newItem) refreshFileListSelection();
+    updateFileDockTitle();
 }
 
 void MainWindow::updateFileDockTitle() {
@@ -3617,10 +4031,15 @@ void MainWindow::refreshFileListSelection() {
     QListWidgetItem *activeItem = nullptr;
     for (int i = 0; i < m_fileList->count(); ++i) {
         QListWidgetItem *item = m_fileList->item(i);
-        const QString itemPath = QFileInfo(item->text()).absoluteFilePath();
+        const QString itemPath = item->text(); // File list paths are normalized on import.
         const bool active = itemPath == m_filePath;
         const bool visited = !active && m_viewedFiles.contains(itemPath);
         const bool marked = m_markedFiles.contains(itemPath);
+        if (active) activeItem = item;
+        if (item->data(ActiveFileRole).isValid() && item->data(ActiveFileRole).toBool() == active &&
+            item->data(VisitedFileRole).toBool() == visited && item->data(MarkedFileRole).toBool() == marked) {
+            continue;
+        }
         item->setData(ActiveFileRole, active);
         item->setData(VisitedFileRole, visited);
         item->setData(MarkedFileRole, marked);
@@ -3643,6 +4062,9 @@ void MainWindow::refreshFileListSelection() {
 void MainWindow::refreshTexts() {
     m_openAction->setText(m_strings.get("openFile"));
     m_openDirAction->setText(m_strings.get("openDir"));
+    m_openMoreMenu->setTitle(m_strings.get("openMore"));
+    m_openYoloDatasetAction->setText(m_strings.get("openYoloDataset"));
+    m_onnxDetectionAction->setText(m_strings.get("onnxDetection"));
     m_openAnnotationAction->setText(m_strings.get("openAnnotation"));
     m_openWithImageViewerAction->setText(m_strings.get("openWithImageViewer"));
     m_openFileLocationAction->setText(m_strings.get("openFileLocation"));
@@ -3669,6 +4091,8 @@ void MainWindow::refreshTexts() {
     m_redoAction->setText(m_strings.get("redo"));
     m_prevShapeAction->setText(m_strings.get("prevShape"));
     m_nextShapeAction->setText(m_strings.get("nextShape"));
+    m_prevLabelAction->setText(m_strings.get("prevLabel"));
+    m_nextLabelAction->setText(m_strings.get("nextLabel"));
     m_deleteAction->setText(m_strings.get("delBox"));
     m_deleteAllShapesAction->setText(m_strings.get("deleteAllShapes"));
     m_copyAction->setText(m_strings.get("dupBox"));
@@ -3684,6 +4108,7 @@ void MainWindow::refreshTexts() {
     m_deleteImageAction->setText(m_strings.get("deleteImg"));
     m_deleteAnnotationAction->setText(m_strings.get("deleteAnnotation"));
     m_createModeAction->setText(m_strings.get("crtBox"));
+    m_repeatCreateAction->setText(m_strings.get("repeatCreate"));
     m_createPolygonModeAction->setText(m_strings.get("createPolygon"));
     m_createPointModeAction->setText(m_strings.get("createPoint"));
     m_createPointsModeAction->setText(m_strings.get("createPoints"));
@@ -3794,16 +4219,19 @@ void MainWindow::refreshTexts() {
         }
     }
     if (m_footerViewShortcut) {
-        m_footerViewShortcut->setText(QStringLiteral("V"));
+        m_footerViewShortcut->setText(m_viewModeAction->shortcuts().value(0).toString(QKeySequence::NativeText));
         m_footerViewShortcut->setToolTip(m_strings.get(QStringLiteral("footerViewTooltip")));
     }
     if (m_footerEditShortcut) {
-        m_footerEditShortcut->setText(m_strings.get(QStringLiteral("footerEditMode")));
+        const QString editShortcut = m_editModeAction->shortcuts().value(0).toString(QKeySequence::NativeText);
+        m_footerEditShortcut->setText(editShortcut.isEmpty()
+                                          ? m_strings.get(QStringLiteral("footerEditMode"))
+                                          : editShortcut);
         m_footerEditShortcut->setToolTip(m_strings.get(QStringLiteral("footerEditTooltip")));
     }
     if (m_footerCreateShortcut) {
-        m_footerCreateShortcut->setText(QStringLiteral("W"));
-        m_footerCreateShortcut->setToolTip(m_strings.get(QStringLiteral("footerCreateTooltip")));
+        m_footerCreateShortcut->setText(m_repeatCreateAction->shortcuts().value(0).toString(QKeySequence::NativeText));
+        m_footerCreateShortcut->setToolTip(m_strings.get(QStringLiteral("repeatCreateTooltip")));
     }
     m_fileDockCloseButton->setToolTip(m_strings.get("hideFileList"));
     m_labelDock->setWindowTitle(m_strings.get("labelDock"));
@@ -3814,6 +4242,12 @@ void MainWindow::refreshTexts() {
     updateFileDockTitle();
     m_fileMenu->setTitle(m_strings.get("menu_file"));
     m_viewMenu->setTitle(m_strings.get("menu_view"));
+    for (QAction *action : m_viewMenu->actions()) {
+        if (QMenu *submenu = action->menu()) {
+            const QString key = submenu->property("translationKey").toString();
+            if (!key.isEmpty()) submenu->setTitle(m_strings.get(key));
+        }
+    }
     m_helpMenu->setTitle(m_strings.get("menu_help"));
     m_languageMenu->setTitle(m_strings.get("language"));
     m_recentFilesMenu->setTitle(m_strings.get("menu_openRecent"));
@@ -3850,6 +4284,8 @@ void MainWindow::refreshActionToolTips() {
         m_redoAction,
         m_prevShapeAction,
         m_nextShapeAction,
+        m_prevLabelAction,
+        m_nextLabelAction,
         m_deleteAction,
         m_deleteAllShapesAction,
         m_copyAction,
@@ -4019,13 +4455,16 @@ void MainWindow::refreshActions() {
     bool hasImage = !m_filePath.isEmpty();
     const bool editingAllowed = !m_editabilityAction || m_editabilityAction->isChecked();
     const bool drawing = m_canvas->isDrawing();
+    m_onnxDetectionAction->setEnabled(editingAllowed && !drawing && !m_aiRequestRunning && !m_annotationLoadFailed);
+    m_repeatCreateAction->setEnabled(hasImage && editingAllowed && !drawing);
+    if (m_footerCreateShortcut) m_footerCreateShortcut->setEnabled(m_repeatCreateAction->isEnabled());
     // Canvas owns the editing selection. The label list can retain a visual
     // current row while it is being synchronized or filtered, so it must not
     // enable destructive/editing actions by itself.
     const bool hasSelection = m_canvas->hasSelection();
     m_saveAction->setEnabled(hasImage && m_dirty && !m_annotationLoadFailed);
-    m_saveAsAction->setEnabled(hasImage);
-    m_openAnnotationAction->setEnabled(hasImage);
+    m_saveAsAction->setEnabled(hasImage && !m_yoloDataset.isOpen());
+    m_openAnnotationAction->setEnabled(hasImage && !m_yoloDataset.isOpen());
     m_openWithImageViewerAction->setEnabled(hasImage);
     m_openFileLocationAction->setEnabled(hasImage);
     if (m_openWithButton) {
@@ -4033,13 +4472,17 @@ void MainWindow::refreshActions() {
     }
     updateFileContextActions();
     m_closeAction->setEnabled(hasImage);
-    m_changeSaveDirAction->setEnabled(true);
+    m_changeSaveDirAction->setEnabled(!m_yoloDataset.isOpen());
+    m_formatAction->setEnabled(!m_yoloDataset.isOpen());
     m_verifyAction->setEnabled(hasImage && !drawing);
     m_undoAction->setEnabled(!drawing && !m_undoStack.isEmpty());
     m_undoLastPointAction->setEnabled(drawing && editingAllowed);
     m_redoAction->setEnabled(!m_redoStack.isEmpty());
     m_prevShapeAction->setEnabled(hasImage);
     m_nextShapeAction->setEnabled(hasImage);
+    const bool hasLabels = hasImage && m_labelList && m_labelList->count() > 0;
+    m_prevLabelAction->setEnabled(hasLabels);
+    m_nextLabelAction->setEnabled(hasLabels);
     m_nextCopyAction->setEnabled(hasImage && m_currentImageIndex + 1 < m_imageList.size());
     m_prevCopyAction->setEnabled(hasImage && m_currentImageIndex > 0);
     m_deleteImageAction->setEnabled(hasImage);
@@ -4069,7 +4512,8 @@ void MainWindow::refreshActions() {
     }
     for (QAction *action : createActions) {
         if (action) {
-            action->setEnabled(hasImage && editingAllowed && action != activeCreateAction);
+            const bool supported = !m_yoloDataset.isOpen() || action == m_createModeAction;
+            action->setEnabled(hasImage && editingAllowed && supported && action != activeCreateAction);
         }
     }
     const bool maskSelected = m_canvas->hasSelection() &&
@@ -4093,7 +4537,7 @@ void MainWindow::refreshActions() {
     m_copyAction->setEnabled(hasSelection && editingAllowed && !drawing);
     m_copyShapesAction->setEnabled(hasSelection && editingAllowed && !drawing);
     const bool hasClipboardShapes = !m_shapeClipboard.isEmpty() ||
-                                    !shapesFromClipboardMime(QApplication::clipboard()->mimeData()).isEmpty();
+                                    m_externalClipboardHasShapes;
     m_pasteShapesAction->setEnabled(hasImage && editingAllowed && !drawing && hasClipboardShapes);
     m_copyHereAction->setEnabled(hasSelection && editingAllowed && !drawing);
     m_moveHereAction->setEnabled(hasSelection && editingAllowed && !drawing);
@@ -4235,17 +4679,7 @@ void MainWindow::loadRecentDir(const QString &path) {
         rebuildRecentDirsMenu();
         return;
     }
-    if (!maybeSave()) return;
-    m_settings.setValue("lastOpenDir", path);
-    m_dirPath = QFileInfo(path).absoluteFilePath();
-    m_imageList = scanImages(m_dirPath);
-    m_currentImageIndex = 0;
-    populateFileList();
-    addRecentDir(m_dirPath);
-    const QString preferred = preferredImageForCurrentDir();
-    if (!preferred.isEmpty()) {
-        loadImage(preferred);
-    }
+    openDirectory(path);
 }
 
 QString MainWindow::preferredImageForCurrentDir() const {
@@ -4262,10 +4696,11 @@ QString MainWindow::preferredImageForCurrentDir() const {
 
 void MainWindow::setFileThumbnailMode(bool enabled) {
     m_settings.setValue("view/fileThumbnails", enabled);
-    populateFileList();
+    populateFileList(false);
 }
 
 void MainWindow::setFormat(SaveFormat format) {
+    if (m_yoloDataset.isOpen()) format = SaveFormat::Yolo;
     m_format = format;
     m_formatAction->setText(currentFormatName());
     assignActionIcons();
@@ -4447,6 +4882,9 @@ void MainWindow::openFile() {
 
 bool MainWindow::openPath(const QString &path) {
     const QFileInfo info(path);
+    if (info.isDir()) return openDirectory(info.absoluteFilePath());
+    if (info.suffix().compare("yaml", Qt::CaseInsensitive) == 0 ||
+        info.suffix().compare("yml", Qt::CaseInsensitive) == 0) return openYoloDataset(path);
     if (!info.isFile()) {
         return false;
     }
@@ -4472,17 +4910,112 @@ bool MainWindow::openPath(const QString &path) {
     return true;
 }
 
+void MainWindow::openYoloDatasetDialog() {
+    const QString dir = QFileDialog::getExistingDirectory(this, m_strings.get("openYoloDataset"),
+        m_settings.value("lastYoloDatasetDir", m_settings.value("lastOpenDir")).toString());
+    if (!dir.isEmpty() && !openYoloDataset(dir)) {
+        QMessageBox::warning(this, QStringLiteral("labelImgCpp"), statusBar()->currentMessage());
+    }
+}
+
+bool MainWindow::openYoloDataset(const QString &path) {
+    YoloDataset dataset;
+    QString error;
+    if (!YoloDataset::load(path, &dataset, &error)) {
+        statusBar()->showMessage(m_strings.get("failedLoad").arg(path, error), 8000);
+        return false;
+    }
+    const QStringList images = scanImages(QDir(dataset.root).filePath("images"));
+    if (images.isEmpty()) {
+        statusBar()->showMessage(m_strings.get("yoloDatasetNoImages"), 8000);
+        return false;
+    }
+    if (!maybeSave()) {
+        statusBar()->showMessage(m_strings.get("yoloDatasetOpenCancelled"), 3000);
+        return false;
+    }
+    if (!m_yoloDataset.isOpen()) m_classesBeforeDataset = m_classList;
+    setDirty(false);
+    m_yoloDataset = dataset;
+    m_classList = dataset.classes;
+    {
+        QSignalBlocker blocker(m_defaultLabelCombo);
+        m_defaultLabelCombo->clear();
+        m_defaultLabelCombo->addItems(m_classList);
+    }
+    m_lastUsedLabel = m_classList.first();
+    refreshUniqueLabelList();
+    m_annotationPathOverride.clear();
+    m_hasAnnotationPathOverride = false;
+    setFormat(SaveFormat::Yolo);
+    setCreateShapeMode(QStringLiteral("rectangle"), m_createModeAction);
+    setEditMode();
+    m_dirPath = dataset.root;
+    m_imageList = images;
+    m_currentImageIndex = 0;
+    m_fileLabelFilter.clear();
+    populateFileList();
+    addRecentDir(dataset.root);
+    m_settings.setValue("lastYoloDatasetDir", dataset.root);
+    const bool loaded = loadImage(preferredImageForCurrentDir());
+    refreshActions();
+    return loaded;
+}
+
+void MainWindow::leaveYoloDataset() {
+    if (!m_yoloDataset.isOpen()) return;
+    m_yoloDataset = {};
+    m_classList = m_classesBeforeDataset;
+    m_classesBeforeDataset.clear();
+    {
+        QSignalBlocker blocker(m_defaultLabelCombo);
+        m_defaultLabelCombo->clear();
+        m_defaultLabelCombo->addItems(m_classList);
+    }
+    refreshUniqueLabelList();
+    syncFormatFooterControls();
+    refreshActions();
+}
+
 void MainWindow::openDir() {
-    QString dir = QFileDialog::getExistingDirectory(this, m_strings.get("openDir"), m_settings.value("lastOpenDir").toString());
-    if (dir.isEmpty()) return;
-    m_settings.setValue("lastOpenDir", dir);
-    m_dirPath = dir;
-    m_imageList = scanImages(dir);
+    const QString dir = QFileDialog::getExistingDirectory(this, m_strings.get("openDir"), m_settings.value("lastOpenDir").toString());
+    if (!dir.isEmpty()) openDirectory(dir);
+}
+
+bool MainWindow::openDirectory(const QString &path) {
+    if (!QFileInfo(path).isDir()) return false;
+    // Only offer a dataset mode after validating its structure and class map.
+    // A generic YAML file or incomplete dataset keeps the normal folder rules.
+    YoloDataset detected;
+    QString error;
+    if (YoloDataset::load(path, &detected, &error)) {
+        QMessageBox box(QMessageBox::Question, m_strings.get("datasetDetectedTitle"),
+                        m_strings.get("yoloDatasetDetectedPrompt")
+                            .arg(QDir::toNativeSeparators(detected.root))
+                            .arg(detected.classes.size()),
+                        QMessageBox::Ok | QMessageBox::Cancel, this);
+        box.setObjectName(QStringLiteral("datasetDetectedDialog"));
+        box.setTextFormat(Qt::PlainText);
+        box.button(QMessageBox::Ok)->setText(m_strings.get("datasetOpenConfirm"));
+        box.button(QMessageBox::Cancel)->setText(m_strings.get("datasetOpenCancel"));
+        box.setDefaultButton(QMessageBox::Ok);
+        box.setEscapeButton(QMessageBox::Cancel);
+        if (box.exec() == QMessageBox::Ok) return openYoloDataset(detected.configPath);
+        // Cancel, Escape and the window close button all choose normal opening.
+    }
+    if (!maybeSave()) return false;
+    leaveYoloDataset();
+    setDirty(false);
+    m_settings.setValue("lastOpenDir", path);
+    m_dirPath = QFileInfo(path).absoluteFilePath();
+    m_imageList = scanImages(m_dirPath);
     m_currentImageIndex = 0;
     populateFileList();
     addRecentDir(m_dirPath);
     const QString preferred = preferredImageForCurrentDir();
-    if (!preferred.isEmpty()) loadImage(preferred);
+    if (!preferred.isEmpty()) return loadImage(preferred);
+    closeFile();
+    return true;
 }
 
 void MainWindow::openAnnotationDialog() {
@@ -4527,16 +5060,34 @@ void MainWindow::revealCurrentImageInFolder() {
 #endif
 }
 
+void MainWindow::reloadImageQueue() {
+    if (m_dirPath.isEmpty()) return;
+    const QString directory = m_yoloDataset.isOpen()
+                                  ? QDir(m_yoloDataset.root).filePath(QStringLiteral("images"))
+                                  : m_dirPath;
+    m_imageList = scanImages(directory);
+    // Keep the loaded image and its edits. If it too has disappeared, the next
+    // navigation starts at the beginning of the newly scanned queue.
+    m_currentImageIndex = m_imageList.indexOf(m_filePath);
+    populateFileList();
+    refreshActions();
+    statusBar()->showMessage(m_strings.get("imageQueueReloaded").arg(m_imageList.size()), 5000);
+}
+
 void MainWindow::openNextImage() {
-    if (m_imageList.isEmpty()) return;
-    if (m_currentImageIndex + 1 < m_imageList.size()) ++m_currentImageIndex;
-    loadImage(m_imageList[m_currentImageIndex]);
+    if (m_imageList.isEmpty() || m_currentImageIndex + 1 >= m_imageList.size()) {
+        statusBar()->showMessage(m_strings.get("noNextImage"), 5000);
+        return;
+    }
+    // loadImage commits the index only after a successful load.
+    const QString nextPath = m_imageList[m_currentImageIndex + 1];
+    loadImage(nextPath);
 }
 
 void MainWindow::openPrevImage() {
     if (m_imageList.isEmpty()) return;
-    if (m_currentImageIndex > 0) --m_currentImageIndex;
-    loadImage(m_imageList[m_currentImageIndex]);
+    const QString previousPath = m_imageList[qMax(0, m_currentImageIndex - 1)];
+    loadImage(previousPath);
 }
 
 void MainWindow::closeFile() {
@@ -4596,14 +5147,19 @@ bool MainWindow::saveCurrentFile() {
     AnnotationDocument doc = currentDocument();
     bool ok = false;
     if (m_format == SaveFormat::PascalVoc) ok = AnnotationIO::savePascalVoc(path, doc);
-    if (m_format == SaveFormat::Yolo) ok = AnnotationIO::saveYolo(path, doc, m_classList);
+    if (m_format == SaveFormat::Yolo) {
+        if (m_yoloDataset.isOpen()) {
+            ok = !path.isEmpty() && QDir().mkpath(QFileInfo(path).absolutePath()) &&
+                 AnnotationIO::saveYolo(path, doc, m_yoloDataset.classes, false);
+        } else {
+            ok = AnnotationIO::saveYolo(path, doc, m_classList);
+        }
+    }
     if (m_format == SaveFormat::CreateMl) ok = AnnotationIO::saveCreateMl(path, doc);
     if (m_format == SaveFormat::LabelMe) ok = AnnotationIO::saveLabelMe(path, doc);
     if (ok) {
         setDirty(false);
-        if (!m_imageList.isEmpty()) {
-            populateFileList();
-        }
+        refreshSavedFileItem();
     } else {
         statusBar()->showMessage(m_strings.get(QStringLiteral("failedSave")).arg(path), 8000);
     }
@@ -4615,6 +5171,7 @@ void MainWindow::saveFile() {
 }
 
 void MainWindow::saveFileAs() {
+    if (m_yoloDataset.isOpen()) return;
     QString filter;
     QString defaultSuffix;
     if (m_format == SaveFormat::PascalVoc) {
@@ -4666,23 +5223,24 @@ void MainWindow::saveFileAs() {
         m_hasAnnotationPathOverride = true;
         m_annotationLoadFailed = false;
         setDirty(false);
-        if (!m_imageList.isEmpty()) {
-            populateFileList();
-        }
+        refreshSavedFileItem();
     } else {
         statusBar()->showMessage(m_strings.get(QStringLiteral("failedSave")).arg(path), 8000);
     }
 }
 
 void MainWindow::changeSaveDir() {
+    if (m_yoloDataset.isOpen()) return;
     QString dir = QFileDialog::getExistingDirectory(this, m_strings.get("changeSaveDir"), m_saveDir);
     if (!dir.isEmpty()) {
         m_saveDir = dir;
+        populateFileList();
         m_settings.setValue("savedir", m_saveDir);
     }
 }
 
 void MainWindow::changeFormat() {
+    if (m_yoloDataset.isOpen()) return;
     if (m_format == SaveFormat::PascalVoc) setFormat(SaveFormat::Yolo);
     else if (m_format == SaveFormat::Yolo) setFormat(SaveFormat::CreateMl);
     else if (m_format == SaveFormat::CreateMl) setFormat(SaveFormat::LabelMe);
@@ -4929,6 +5487,8 @@ bool MainWindow::editCurrentLabel() {
     labelCombo->setFocus(Qt::PopupFocusReason);
     if (labelCombo->lineEdit()) {
         labelCombo->lineEdit()->selectAll();
+        new LabelSpaceConfirmFilter(labelCombo->lineEdit(), labelEditList,
+                                    buttons->button(QDialogButtonBox::Ok), &dialog);
     }
 
     if (dialog.exec() != QDialog::Accepted) {
@@ -5551,8 +6111,29 @@ void MainWindow::showInfoDialog() {
 }
 
 void MainWindow::showShortcutsDialog() {
-    QMessageBox::information(this, m_strings.get("shortcut"),
-                               "A/D: previous/next image\nCtrl+Shift+A/D: previous/next image and copy shapes\nW: create box\nP: create polygon\nMode menu: create point/line/linestrip/circle/oriented rectangle/mask\nV: view mode\nEditability: Settings\nQ/E: previous/next box\nX/S/Delete: delete label\nCtrl+Z/Y: undo/redo\nCtrl+C/V: copy/paste selected shapes\nCtrl+D: duplicate selected shapes\nCtrl+Shift+V: copy previous image boxes\nZ/C: previous/next label\nAlt+Click edge: insert polygon/linestrip point\nAlt+Shift+Click point: remove polygon/linestrip point\nBackspace: remove hovered polygon/linestrip point\nSpace: verified\nCtrl+Wheel: zoom\nCtrl+Shift+Wheel: brightness");
+    QStringList lines;
+    QString lastCategory;
+    for (const ShortcutCommand &command : m_shortcutRegistry.commands()) {
+        if (command.shortcuts.isEmpty()) {
+            continue;
+        }
+        if (command.category != lastCategory) {
+            if (!lines.isEmpty()) {
+                lines.append(QString());
+            }
+            lines.append(command.category.toUpper());
+            lastCategory = command.category;
+        }
+        QAction *action = m_shortcutActions.value(command.id).value(0, nullptr);
+        QString name = action ? action->text() : command.id;
+        name.remove(QLatin1Char('&'));
+        QStringList bindings;
+        for (const QKeySequence &sequence : command.shortcuts) {
+            bindings.append(sequence.toString(QKeySequence::NativeText));
+        }
+        lines.append(QStringLiteral("%1    %2").arg(bindings.join(QStringLiteral(" / ")), name));
+    }
+    QMessageBox::information(this, m_strings.get("shortcut"), lines.join(QLatin1Char('\n')));
 }
 
 void MainWindow::openTutorial() {
@@ -5567,15 +6148,35 @@ void MainWindow::showSettingsDialog() {
     QDialog dialog(this);
     dialog.setObjectName(QStringLiteral("settingsDialog"));
     dialog.setWindowTitle(m_strings.get("settings"));
-    dialog.resize(560, 520);
+    dialog.resize(860, 600);
+    dialog.setStyleSheet(QStringLiteral(
+        "QListWidget#settingsCategoryList { border: 0; border-right: 1px solid #d8dde3; background: #f6f7f8; padding: 6px; }"
+        "QListWidget#settingsCategoryList::item { min-height: 34px; padding: 0 10px; border-radius: 5px; }"
+        "QListWidget#settingsCategoryList::item:selected { color: #0b5f47; background: #dff1e8; }"
+        "QLineEdit[shortcutConflict=\"true\"] { border: 1px solid #d14343; background: #fff1f1; color: #9f1d1d; }"));
 
-    auto *tabs = new QTabWidget(&dialog);
-    auto *generalPage = new QWidget(tabs);
+    ShortcutRegistry pendingShortcuts = m_shortcutRegistry;
+    auto *categories = new QListWidget(&dialog);
+    categories->setObjectName(QStringLiteral("settingsCategoryList"));
+    categories->setFixedWidth(150);
+    categories->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto *pages = new QStackedWidget(&dialog);
+    pages->setObjectName(QStringLiteral("settingsPages"));
+    auto *generalPage = new QWidget(pages);
     auto *generalForm = new QFormLayout(generalPage);
-    auto *viewPage = new QWidget(tabs);
+    generalForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    auto *viewPage = new QWidget(pages);
     auto *viewForm = new QFormLayout(viewPage);
-    tabs->addTab(generalPage, m_strings.get(QStringLiteral("settingsGeneral")));
-    tabs->addTab(viewPage, m_strings.get(QStringLiteral("settingsViewAnnotation")));
+    viewForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    auto *shortcutPage = new QWidget(pages);
+    pages->addWidget(generalPage);
+    pages->addWidget(viewPage);
+    pages->addWidget(shortcutPage);
+    categories->addItem(m_strings.get(QStringLiteral("settingsGeneral")));
+    categories->addItem(m_strings.get(QStringLiteral("settingsViewAnnotation")));
+    categories->addItem(m_strings.get(QStringLiteral("settingsShortcuts")));
+    categories->setCurrentRow(0);
+    connect(categories, &QListWidget::currentRowChanged, pages, &QStackedWidget::setCurrentIndex);
 
     auto *languageCombo = new QComboBox(generalPage);
     languageCombo->setObjectName(QStringLiteral("settingsLanguageCombo"));
@@ -5694,11 +6295,168 @@ void MainWindow::showSettingsDialog() {
         viewForm, viewPage, QStringLiteral("settingsCrosshair"), m_strings.get(QStringLiteral("crosshair")),
         m_canvas->crosshairEnabledForShapeType(QStringLiteral("rectangle")));
 
+    auto *shortcutLayout = new QVBoxLayout(shortcutPage);
+    shortcutLayout->setContentsMargins(12, 4, 4, 4);
+    auto *shortcutSearch = new QLineEdit(shortcutPage);
+    shortcutSearch->setObjectName(QStringLiteral("shortcutSearch"));
+    shortcutSearch->setPlaceholderText(m_strings.get(QStringLiteral("shortcutSearch")));
+    shortcutSearch->setClearButtonEnabled(true);
+    shortcutLayout->addWidget(shortcutSearch);
+
+    auto *shortcutTable = new QTableWidget(shortcutPage);
+    shortcutTable->setObjectName(QStringLiteral("shortcutTable"));
+    shortcutTable->setColumnCount(4);
+    shortcutTable->setHorizontalHeaderLabels({
+        m_strings.get(QStringLiteral("shortcutCommand")),
+        m_strings.get(QStringLiteral("shortcutPrimary")),
+        m_strings.get(QStringLiteral("shortcutSecondary")),
+        QString()});
+    shortcutTable->verticalHeader()->hide();
+    shortcutTable->setSelectionMode(QAbstractItemView::NoSelection);
+    shortcutTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    shortcutTable->setAlternatingRowColors(true);
+    shortcutTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    shortcutTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    shortcutTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    shortcutTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Fixed);
+    shortcutTable->setColumnWidth(3, 38);
+    shortcutLayout->addWidget(shortcutTable, 1);
+
+    auto *shortcutFooter = new QHBoxLayout();
+    auto *shortcutConflict = new QLabel(shortcutPage);
+    shortcutConflict->setObjectName(QStringLiteral("shortcutConflictLabel"));
+    shortcutConflict->setStyleSheet(QStringLiteral("color: #b42318;"));
+    shortcutFooter->addWidget(shortcutConflict, 1);
+    auto *shortcutRestoreAll = new QPushButton(m_strings.get(QStringLiteral("shortcutRestoreAll")), shortcutPage);
+    shortcutRestoreAll->setObjectName(QStringLiteral("shortcutRestoreAll"));
+    shortcutFooter->addWidget(shortcutRestoreAll);
+    shortcutLayout->addLayout(shortcutFooter);
+
+    QHash<QString, QPair<ShortcutCaptureEdit *, ShortcutCaptureEdit *>> shortcutEditors;
+    const QVector<ShortcutCommand> shortcutCommands = pendingShortcuts.commands();
+    shortcutTable->setRowCount(shortcutCommands.size());
+    for (int row = 0; row < shortcutCommands.size(); ++row) {
+        const ShortcutCommand &command = shortcutCommands.at(row);
+        QAction *displayAction = m_shortcutActions.value(command.id).value(0, nullptr);
+        QString commandText = displayAction ? displayAction->text() : command.id;
+        commandText.remove(QLatin1Char('&'));
+        if (commandText.trimmed().isEmpty()) {
+            commandText = command.id;
+        }
+        auto *commandItem = new QTableWidgetItem(commandText);
+        commandItem->setData(Qt::UserRole, command.id);
+        commandItem->setData(Qt::UserRole + 1,
+                             QStringLiteral("%1 %2 %3").arg(commandText, command.id, command.category).toLower());
+        shortcutTable->setItem(row, 0, commandItem);
+
+        auto *primary = new ShortcutCaptureEdit(shortcutTable);
+        primary->setObjectName(QStringLiteral("shortcutPrimary_%1").arg(command.id));
+        auto *secondary = new ShortcutCaptureEdit(shortcutTable);
+        secondary->setObjectName(QStringLiteral("shortcutSecondary_%1").arg(command.id));
+        if (!command.shortcuts.isEmpty()) {
+            primary->setSequence(command.shortcuts.at(0));
+        }
+        if (command.shortcuts.size() > 1) {
+            secondary->setSequence(command.shortcuts.at(1));
+        }
+        shortcutTable->setCellWidget(row, 1, primary);
+        shortcutTable->setCellWidget(row, 2, secondary);
+        shortcutEditors.insert(command.id, qMakePair(primary, secondary));
+
+        auto *reset = new QToolButton(shortcutTable);
+        reset->setObjectName(QStringLiteral("shortcutReset_%1").arg(command.id));
+        reset->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
+        reset->setToolTip(m_strings.get(QStringLiteral("shortcutReset")));
+        reset->setAutoRaise(true);
+        shortcutTable->setCellWidget(row, 3, reset);
+    }
+
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    buttons->setObjectName(QStringLiteral("settingsButtons"));
+    QPushButton *okButton = buttons->button(QDialogButtonBox::Ok);
+    auto refreshShortcutConflicts = [&pendingShortcuts, &shortcutEditors, shortcutConflict, okButton, this]() {
+        for (auto it = shortcutEditors.cbegin(); it != shortcutEditors.cend(); ++it) {
+            for (ShortcutCaptureEdit *editor : {it.value().first, it.value().second}) {
+                editor->setProperty("shortcutConflict", false);
+                editor->style()->unpolish(editor);
+                editor->style()->polish(editor);
+            }
+        }
+        const QVector<ShortcutConflict> conflicts = pendingShortcuts.conflicts();
+        for (const ShortcutConflict &conflict : conflicts) {
+            for (const ShortcutLocation &location : conflict.locations) {
+                const auto editors = shortcutEditors.value(location.commandId);
+                for (ShortcutCaptureEdit *editor : {editors.first, editors.second}) {
+                    if (editor && editor->sequence() == conflict.sequence) {
+                        editor->setProperty("shortcutConflict", true);
+                        editor->style()->unpolish(editor);
+                        editor->style()->polish(editor);
+                    }
+                }
+            }
+        }
+        const bool valid = conflicts.isEmpty();
+        okButton->setEnabled(valid);
+        shortcutConflict->setText(valid ? QString() : m_strings.get(QStringLiteral("shortcutConflict")));
+    };
+    auto updateShortcutCommand = [&pendingShortcuts, &shortcutEditors, &refreshShortcutConflicts](const QString &commandId) {
+        const auto editors = shortcutEditors.value(commandId);
+        QList<QKeySequence> sequences;
+        if (editors.first && !editors.first->sequence().isEmpty()) {
+            sequences.append(editors.first->sequence());
+        }
+        if (editors.second && !editors.second->sequence().isEmpty()) {
+            sequences.append(editors.second->sequence());
+        }
+        pendingShortcuts.setShortcuts(commandId, sequences);
+        refreshShortcutConflicts();
+    };
+    for (auto it = shortcutEditors.cbegin(); it != shortcutEditors.cend(); ++it) {
+        const QString commandId = it.key();
+        connect(it.value().first, &ShortcutCaptureEdit::sequenceChanged, &dialog,
+                [commandId, &updateShortcutCommand](const QKeySequence &) { updateShortcutCommand(commandId); });
+        connect(it.value().second, &ShortcutCaptureEdit::sequenceChanged, &dialog,
+                [commandId, &updateShortcutCommand](const QKeySequence &) { updateShortcutCommand(commandId); });
+        if (auto *reset = shortcutTable->findChild<QToolButton *>(QStringLiteral("shortcutReset_%1").arg(commandId))) {
+            connect(reset, &QToolButton::clicked, &dialog, [commandId, &pendingShortcuts, &shortcutEditors,
+                                                            &refreshShortcutConflicts]() {
+                pendingShortcuts.reset(commandId);
+                const ShortcutCommand command = pendingShortcuts.command(commandId);
+                const auto editors = shortcutEditors.value(commandId);
+                editors.first->setSequence(command.shortcuts.value(0));
+                editors.second->setSequence(command.shortcuts.value(1));
+                refreshShortcutConflicts();
+            });
+        }
+    }
+    connect(shortcutRestoreAll, &QPushButton::clicked, &dialog,
+            [&pendingShortcuts, &shortcutEditors, &refreshShortcutConflicts]() {
+        pendingShortcuts.resetAll();
+        for (const ShortcutCommand &command : pendingShortcuts.commands()) {
+            const auto editors = shortcutEditors.value(command.id);
+            editors.first->setSequence(command.shortcuts.value(0));
+            editors.second->setSequence(command.shortcuts.value(1));
+        }
+        refreshShortcutConflicts();
+    });
+    connect(shortcutSearch, &QLineEdit::textChanged, shortcutTable,
+            [shortcutTable](const QString &text) {
+        const QString query = text.trimmed().toLower();
+        for (int row = 0; row < shortcutTable->rowCount(); ++row) {
+            const QString haystack = shortcutTable->item(row, 0)->data(Qt::UserRole + 1).toString();
+            shortcutTable->setRowHidden(row, !query.isEmpty() && !haystack.contains(query));
+        }
+    });
+    refreshShortcutConflicts();
+
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     auto *layout = new QVBoxLayout(&dialog);
-    layout->addWidget(tabs);
+    auto *contentLayout = new QHBoxLayout();
+    contentLayout->setSpacing(0);
+    contentLayout->addWidget(categories);
+    contentLayout->addWidget(pages, 1);
+    layout->addLayout(contentLayout, 1);
     layout->addWidget(buttons);
 
     if (dialog.exec() != QDialog::Accepted) {
@@ -5708,6 +6466,9 @@ void MainWindow::showSettingsDialog() {
         return;
     }
 
+    if (pendingShortcuts.hasConflicts()) {
+        return;
+    }
     const QString language = languageCombo->currentData().toString();
     if (!language.isEmpty() && language != m_strings.language()) {
         changeLanguage(language);
@@ -5792,6 +6553,9 @@ void MainWindow::showSettingsDialog() {
     m_canvas->setDoubleClickClose(doubleClickClose->isChecked());
     m_canvas->setSnapping(snapping->isChecked());
     m_canvas->setCrosshairEnabledForShapeType(QStringLiteral("rectangle"), crosshair->isChecked());
+    m_shortcutRegistry = pendingShortcuts;
+    m_shortcutRegistry.saveOverrides(m_settings);
+    applyShortcutRegistry();
     saveSettings();
     refreshActions();
 }
@@ -5817,6 +6581,8 @@ void MainWindow::setCreateShapeMode(const QString &shapeType, QAction *activeAct
         setViewMode();
         return;
     }
+    m_lastCreateAction = activeAction;
+    m_lastCreateShapeType = shapeType;
     {
         QSignalBlocker createBlocker(m_createModeAction);
         QSignalBlocker polygonBlocker(m_createPolygonModeAction);
@@ -5892,6 +6658,11 @@ void MainWindow::updateAiModelAvailability(bool pointPrompt) {
             m_settings.setValue(QStringLiteral("ai/model"), m_aiModelCombo->currentData().toString());
         }
     }
+}
+
+void MainWindow::repeatCreateMode() {
+    if (m_filePath.isEmpty() || m_canvas->isDrawing() || !m_editabilityAction->isChecked()) return;
+    setCreateShapeMode(m_lastCreateShapeType, m_lastCreateAction ? m_lastCreateAction : m_createModeAction);
 }
 
 void MainWindow::setCreateMode() {
@@ -6290,6 +7061,32 @@ void MainWindow::onCanvasShapeCreated(int index) {
         return;
     }
     editCreatedShapeLabel(index);
+}
+
+void MainWindow::openOnnxDetection() {
+    if (m_aiRequestRunning || m_canvas->isDrawing() || m_annotationLoadFailed ||
+        (m_editabilityAction && !m_editabilityAction->isChecked())) return;
+    QTemporaryDir temporary;
+    QString imagePath;
+    if (!m_filePath.isEmpty()) {
+        // Snapshot the original, oriented image, including embedded LabelMe images.
+        QImage image;
+        if (!m_labelMeImageData.isEmpty()) {
+            image.loadFromData(QByteArray::fromBase64(m_labelMeImageData.toLatin1()));
+            image = ImageIO::normalizeForDisplay(image);
+        } else {
+            image = ImageIO::readForDisplay(m_filePath);
+        }
+        imagePath = temporary.filePath(QStringLiteral("image.png"));
+        if (!temporary.isValid() || image.isNull() || !image.save(imagePath)) {
+            QMessageBox::warning(this, m_strings.get("onnxDetection"), m_strings.get("onnxImageFailed"));
+            return;
+        }
+    }
+    OnnxDetectionDialog dialog(imagePath, m_yoloDataset.classes, m_settings, m_strings, this);
+    if (dialog.exec() == QDialog::Accepted) {
+        finishAiTextAssist(dialog.shapes(), dialog.iouThreshold());
+    }
 }
 
 QString MainWindow::aiBridgeScriptPath() const {
@@ -6753,6 +7550,7 @@ void MainWindow::onCanvasShapeEditFinished(bool changed) {
         m_lastShapeSnapshot = m_canvas->shapes();
     }
     refreshActions();
+    scheduleAutoSave();
 }
 
 void MainWindow::onCanvasShapesChanged() {
@@ -6880,6 +7678,23 @@ void MainWindow::changeLanguage(const QString &language) {
     refreshTexts();
 }
 
+void MainWindow::showEvent(QShowEvent *event) {
+    QMainWindow::showEvent(event);
+#ifdef Q_OS_WIN
+    if (QGuiApplication::platformName() == QStringLiteral("windows")) {
+        const HWND hwnd = reinterpret_cast<HWND>(winId());
+        const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        const LONG_PTR resizableStyle = style | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU;
+        if (style != resizableStyle) {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, resizableStyle);
+            // Keep system sizing/snap behavior while WM_NCCALCSIZE hides the frame.
+            SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
+    }
+#endif
+}
+
 void MainWindow::resizeEvent(QResizeEvent *event) {
     QMainWindow::resizeEvent(event);
     updateFitScale();
@@ -6893,30 +7708,6 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
 void MainWindow::keyPressEvent(QKeyEvent *event) {
     if (event->key() == Qt::Key_Control) {
         m_canvas->setDrawSquare(true);
-    } else if (event->modifiers() == Qt::NoModifier && event->key() == Qt::Key_W) {
-        setCreateMode();
-    } else if (event->modifiers() == Qt::NoModifier && event->key() == Qt::Key_V) {
-        setViewMode();
-    } else if (event->modifiers() == Qt::NoModifier && event->key() == Qt::Key_Z) {
-        selectAdjacentLabel(-1);
-    } else if (event->modifiers() == Qt::NoModifier && event->key() == Qt::Key_C) {
-        selectAdjacentLabel(1);
-    } else if (event->modifiers() == Qt::NoModifier && event->key() == Qt::Key_S) {
-        deleteCurrentShape();
-    } else if (event->modifiers() == Qt::NoModifier && event->key() == Qt::Key_X) {
-        if (m_deleteAction->isEnabled()) {
-            deleteCurrentShape();
-        }
-    } else if (event->modifiers() == Qt::ControlModifier && event->key() == Qt::Key_Z) {
-        if (!m_canvas->undoLastDrawingPoint()) {
-            undoShapeOperation();
-        }
-    } else if (event->modifiers() == Qt::ControlModifier && event->key() == Qt::Key_Y) {
-        redoShapeOperation();
-    } else if (event->modifiers() == Qt::NoModifier && event->key() == Qt::Key_Q) {
-        selectAdjacentShape(-1);
-    } else if (event->modifiers() == Qt::NoModifier && event->key() == Qt::Key_E) {
-        selectAdjacentShape(1);
     } else {
         QMainWindow::keyPressEvent(event);
     }
@@ -7006,6 +7797,10 @@ void MainWindow::changeEvent(QEvent *event) {
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+    if (m_fileList && watched == m_fileList->viewport() &&
+        (event->type() == QEvent::Resize || event->type() == QEvent::Show)) {
+        QTimer::singleShot(0, this, &MainWindow::loadVisibleFileThumbnails);
+    }
     if (watched == m_uniqueLabelList) {
         if (event->type() == QEvent::KeyPress) {
             auto *keyEvent = static_cast<QKeyEvent *>(event);
@@ -7017,25 +7812,6 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
             auto *mouseEvent = static_cast<QMouseEvent *>(event);
             if (!m_uniqueLabelList->itemAt(mouseEvent->position().toPoint())) {
                 m_uniqueLabelList->clearSelection();
-            }
-        }
-    }
-    if ((watched == m_canvas || watched == m_labelList) && event->type() == QEvent::KeyPress) {
-        auto *keyEvent = static_cast<QKeyEvent *>(event);
-        if (keyEvent->modifiers() == Qt::NoModifier) {
-            if (keyEvent->key() == Qt::Key_Q) {
-                selectAdjacentShape(-1);
-                return true;
-            }
-            if (keyEvent->key() == Qt::Key_E) {
-                selectAdjacentShape(1);
-                return true;
-            }
-            if (keyEvent->key() == Qt::Key_X) {
-                if (m_deleteAction->isEnabled()) {
-                    deleteCurrentShape();
-                }
-                return true;
             }
         }
     }
@@ -7149,6 +7925,34 @@ void MainWindow::selectAdjacentLabel(int step) {
     selectLabelRow(next);
 }
 
+void MainWindow::scrollCanvasToCurrentShape() {
+    if (!m_canvas || !m_scrollArea) return;
+    const int index = m_canvas->currentIndex();
+    const auto shapes = m_canvas->shapes();
+    if (index < 0 || index >= shapes.size() || shapes[index].points.isEmpty()) return;
+
+    const qreal scale = m_canvas->scale();
+    const QRectF bounds = shapes[index].boundingRect();
+    const QPointF origin = m_canvas->imageOriginOffset();
+    // Annotation coordinates are in the original image, including preview mode.
+    // Canvas adds overscroll padding before scaling; include it in the mapping.
+    QRectF target((bounds.topLeft() + origin) * scale,
+                  (bounds.bottomRight() + origin) * scale);
+    if (target.width() < 1) target.adjust(-0.5, 0, 0.5, 0);
+    if (target.height() < 1) target.adjust(0, -0.5, 0, 0.5);
+    QWidget *viewport = m_scrollArea->viewport();
+    const QRectF visible(m_canvas->mapFrom(viewport, QPoint(0, 0)), viewport->size());
+    if (visible.contains(target)) return;
+
+    // Keep the user's zoom. Oversized annotations show their center; scrollbars
+    // clamp naturally at image edges. Ordinary selection/mouse edits never pan.
+    const QPointF delta = target.center() - visible.center();
+    auto *horizontal = m_scrollArea->horizontalScrollBar();
+    auto *vertical = m_scrollArea->verticalScrollBar();
+    horizontal->setValue(horizontal->value() + qRound(delta.x()));
+    vertical->setValue(vertical->value() + qRound(delta.y()));
+}
+
 void MainWindow::selectAdjacentShape(int step) {
     const int count = m_canvas ? m_canvas->shapes().size() : 0;
     if (count == 0) {
@@ -7163,20 +7967,24 @@ void MainWindow::selectAdjacentShape(int step) {
             m_labelList->clearSelection();
         } else {
             selectLabelRow(0);
+            scrollCanvasToCurrentShape();
         }
         refreshActions();
         return;
     }
     if (row < 0) {
         selectLabelRow(0);
+        scrollCanvasToCurrentShape();
         return;
     }
     int next = (row + step) % count;
     if (next < 0) next += count;
     selectLabelRow(next);
+    scrollCanvasToCurrentShape();
 }
 
 QString MainWindow::annotationPathForImage(const QString &imagePath) const {
+    if (m_yoloDataset.isOpen()) return m_yoloDataset.annotationPath(imagePath);
     if (m_format == SaveFormat::LabelMe && !m_outputFilePath.isEmpty()) {
         return m_outputFilePath;
     }
@@ -7194,6 +8002,7 @@ bool MainWindow::usesAnnotationPathOverride() const {
 }
 
 bool MainWindow::hasAnnotationForImage(const QString &imagePath) const {
+    if (m_yoloDataset.isOpen()) return QFileInfo::exists(m_yoloDataset.annotationPath(imagePath));
     if (imagePath.isEmpty()) {
         return false;
     }
@@ -7312,6 +8121,7 @@ void MainWindow::syncFormatFooterControls() {
     if (!m_footerFormatCombo) {
         return;
     }
+    m_footerFormatCombo->setEnabled(!m_yoloDataset.isOpen());
     const int index = static_cast<int>(m_format);
     if (m_footerFormatCombo->currentIndex() != index) {
         QSignalBlocker blocker(m_footerFormatCombo);
@@ -7428,24 +8238,32 @@ void MainWindow::refreshWindowTitle() {
     if (m_dirty) {
         title += QLatin1Char('*');
     }
-    setWindowTitle(title);
-    updateFramelessChrome();
+    if (windowTitle() != title) {
+        setWindowTitle(title);
+        updateFramelessChrome();
+    }
 }
 
 void MainWindow::setDirty(bool dirty) {
     m_dirty = dirty;
     refreshWindowTitle();
-    if (dirty && m_autoSaveAction && m_autoSaveAction->isChecked() &&
+    scheduleAutoSave();
+    refreshActions();
+}
+
+void MainWindow::scheduleAutoSave() {
+    if (m_dirty && !m_canvas->isDrawing() && !m_shapeHistoryPending &&
+        m_autoSaveAction && m_autoSaveAction->isChecked() &&
         !m_filePath.isEmpty() && !m_autoSavePending) {
         m_autoSavePending = true;
         QTimer::singleShot(150, this, [this]() {
             m_autoSavePending = false;
-            if (m_dirty && m_autoSaveAction && m_autoSaveAction->isChecked() && !m_filePath.isEmpty()) {
+            if (m_dirty && !m_canvas->isDrawing() && !m_shapeHistoryPending &&
+                m_autoSaveAction && m_autoSaveAction->isChecked() && !m_filePath.isEmpty()) {
                 saveFile();
             }
         });
     }
-    refreshActions();
 }
 
 bool MainWindow::maybeSave() {

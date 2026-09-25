@@ -1,9 +1,11 @@
 #pragma once
 
 #include "core/AnnotationIO.h"
+#include "core/YoloDataset.h"
 #include "core/AiAssistSession.h"
 #include "core/LabelMeConfig.h"
 #include "core/PerformanceMonitor.h"
+#include "core/ShortcutRegistry.h"
 #include "core/StringBundle.h"
 #include "ui/Canvas.h"
 #include "ui/FramelessTitleBar.h"
@@ -15,6 +17,8 @@
 #include <QComboBox>
 #include <QElapsedTimer>
 #include <QHash>
+#include <QCache>
+#include <QThreadPool>
 #include <QLabel>
 #include <QListWidget>
 #include <QMainWindow>
@@ -43,10 +47,12 @@ public:
     explicit MainWindow(QWidget *parent = nullptr, const QString &defaultConfigPath = QString());
     void loadStartupArgs(const QStringList &arguments);
     bool openPath(const QString &path);
+    bool openYoloDataset(const QString &path);
     bool openAnnotation(const QString &path);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    void showEvent(QShowEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void keyReleaseEvent(QKeyEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
@@ -59,6 +65,7 @@ protected:
 private slots:
     void openFile();
     void openDir();
+    void openYoloDatasetDialog();
     void openAnnotationDialog();
     void openCurrentImageWithViewer();
     void revealCurrentImageInFolder();
@@ -110,6 +117,7 @@ private slots:
     void showSettingsDialog();
     void setAdvancedMode(bool enabled);
     void setCreateMode();
+    void repeatCreateMode();
     void setPolygonCreateMode();
     void setPointCreateMode();
     void setPointsCreateMode();
@@ -159,7 +167,12 @@ private:
     enum class SaveFormat { PascalVoc, Yolo, CreateMl, LabelMe };
 
     void createUi();
+    void openOnnxDetection();
     void createActions();
+    void initializeShortcutRegistry();
+    void registerShortcutCommand(const QString &commandId, const QString &category,
+                                 const QList<QAction *> &actions);
+    void applyShortcutRegistry();
     void createMenusAndToolbars();
     void createFooterControls();
     void connectSignals();
@@ -188,20 +201,39 @@ private:
     AnnotationDocument annotationDocumentForImage(const QString &imagePath, const QSize &imageSize,
                                                   SaveFormat *detectedFormat = nullptr,
                                                   QString *errorMessage = nullptr) const;
+    static AnnotationDocument readAnnotationForImage(const QString &imagePath, const QSize &imageSize,
+                                                      const QString &saveDir, const QString &outputFilePath,
+                                                      SaveFormat format, SaveFormat *detectedFormat = nullptr,
+                                                      QString *errorMessage = nullptr, bool previewOnly = false,
+                                                      const YoloDataset &dataset = {});
+    static QImage readFileThumbnail(const QString &path, const QString &saveDir,
+                                    const QString &outputFilePath, SaveFormat format, const YoloDataset &dataset = {});
     void loadAnnotationsForCurrentImage(QString *errorMessage = nullptr);
     void refreshLabels();
     void refreshUniqueLabelList();
     void syncShapeOrderFromLabelList();
-    void populateFileList();
-    QIcon fileThumbnailIcon(const QString &path) const;
+    void populateFileList(bool reloadMetadata = true);
+    void reloadImageQueue();
+    void refreshSavedFileItem();
+    void loadVisibleFileThumbnails();
+    QThreadPool m_thumbnailPool;
+    QCache<QString, QIcon> m_thumbnailCache{256};
+    QHash<QString, QListWidgetItem *> m_fileItems;
+    QSet<QString> m_displayedThumbnails;
+    quint64 m_thumbnailGeneration = 0;
+    bool m_thumbnailLoading = false;
+    bool m_externalClipboardHasShapes = false;
     QStringList labelsForImage(const QString &path) const;
-    void rebuildFileLabelFilterMenu();
+    void rebuildFileLabelFilterMenu(bool reloadLabels = true);
+    QHash<QString, QStringList> m_fileLabels;
+    QSet<QString> m_annotatedFiles;
     void updateFileDockTitle();
     void refreshTopLevelFlagsList();
     QString contextFilePath() const;
     void updateFileContextActions();
     void refreshFileListSelection();
     void scrollLabelListToCurrentShape();
+    void scrollCanvasToCurrentShape();
     void refreshTexts();
     void refreshActionToolTips();
     void assignActionIcons();
@@ -213,6 +245,7 @@ private:
     void addRecentDir(const QString &path);
     void loadRecentFile(const QString &path);
     void loadRecentDir(const QString &path);
+    bool openDirectory(const QString &path);
     QString preferredImageForCurrentDir() const;
     QString preferredNewShapeLabel() const;
     QColor colorForLabel(const QString &label) const;
@@ -261,6 +294,8 @@ private:
 
     StringBundle m_strings;
     QSettings m_settings;
+    ShortcutRegistry m_shortcutRegistry;
+    QHash<QString, QList<QAction *>> m_shortcutActions;
     Canvas *m_canvas = nullptr;
     QScrollArea *m_scrollArea = nullptr;
     QDockWidget *m_labelDock = nullptr;
@@ -311,6 +346,9 @@ private:
     QWidget *m_titleToolContainer = nullptr;
 
     QMenu *m_fileMenu = nullptr;
+    QAction *m_onnxDetectionAction = nullptr;
+    QMenu *m_openMoreMenu = nullptr;
+    QAction *m_openYoloDatasetAction = nullptr;
     QMenu *m_viewMenu = nullptr;
     QMenu *m_helpMenu = nullptr;
     QMenu *m_languageMenu = nullptr;
@@ -351,6 +389,8 @@ private:
     QAction *m_redoAction = nullptr;
     QAction *m_prevShapeAction = nullptr;
     QAction *m_nextShapeAction = nullptr;
+    QAction *m_prevLabelAction = nullptr;
+    QAction *m_nextLabelAction = nullptr;
     QAction *m_deleteAction = nullptr;
     QAction *m_deleteAllShapesAction = nullptr;
     QAction *m_copyAction = nullptr;
@@ -366,6 +406,9 @@ private:
     QAction *m_deleteImageAction = nullptr;
     QAction *m_deleteAnnotationAction = nullptr;
     QAction *m_createModeAction = nullptr;
+    QAction *m_repeatCreateAction = nullptr;
+    QAction *m_lastCreateAction = nullptr;
+    QString m_lastCreateShapeType = QStringLiteral("rectangle");
     QAction *m_createPolygonModeAction = nullptr;
     QAction *m_createPointModeAction = nullptr;
     QAction *m_createPointsModeAction = nullptr;
@@ -462,6 +505,9 @@ private:
     QString m_validateLabelPolicy;
     QString m_dirPath;
     QString m_saveDir;
+    YoloDataset m_yoloDataset;
+    QStringList m_classesBeforeDataset;
+    void leaveYoloDataset();
     // LabelMe's --output accepts a .json path for a single fixed annotation
     // file; keep it separate from the directory-based save setting.
     QString m_outputFilePath;
@@ -491,6 +537,7 @@ private:
     double m_displayFps = 0.0;
     bool m_dirty = false;
     bool m_autoSavePending = false;
+    void scheduleAutoSave();
     bool m_configOverrides = false;
     bool m_verified = false;
     bool m_noSelectionSlot = false;

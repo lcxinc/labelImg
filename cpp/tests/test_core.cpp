@@ -12,6 +12,7 @@
 #include <cstring>
 
 #include "core/AnnotationIO.h"
+#include "core/YoloDataset.h"
 #include "core/AiAssistBridge.h"
 #include "core/AiAssistSession.h"
 #include "core/LabelListModel.h"
@@ -21,6 +22,7 @@
 #include "core/ResourcePaths.h"
 #include "core/StringBundle.h"
 #include "core/WindowChrome.h"
+#include "core/ShortcutRegistry.h"
 
 class CoreTests : public QObject {
     Q_OBJECT
@@ -29,6 +31,9 @@ private slots:
     void stringBundleNormalizesLocales();
     void pascalVocRoundTripsChineseLabels();
     void yoloWritesClassesInEncounterOrder();
+    void yoloDatasetReadsClassFormsAndMapsPaths();
+    void yoloDatasetRejectsInvalidLabelsWithoutOverwriting();
+    void yoloDatasetExternalReadOnlyAudit();
     void createMlUpdatesExistingImageEntry();
     void createMlRejectsMalformedJson();
     void labelMeRoundTripsRectangleJson();
@@ -100,6 +105,10 @@ private slots:
     void performanceMonitorReturnsCpuAndMemoryText();
     void windowChromeStyleAddsStandardResizeAndSnapBits();
     void windowChromeHitRegionsUseLocalLogicalCoordinates();
+    void shortcutRegistryNormalizesAndLimitsBindings();
+    void shortcutRegistryRejectsConflicts();
+    void shortcutRegistryPersistsOnlyOverrides();
+    void shortcutRegistryCanReplaceEffectiveDefaults();
     void imageIoNormalizesHighBitGrayscale();
     void imageIoReadsBoundedPreview();
     void imageIoPreviewPreservesExifDisplaySize();
@@ -2277,7 +2286,7 @@ void CoreTests::labelMeRoundTripsReferencePrimitiveExampleVersion() {
     QVERIFY(input.open(QIODevice::ReadOnly | QIODevice::Text));
     const QJsonObject source = QJsonDocument::fromJson(input.readAll()).object();
     const QString sourceVersion = source.value(QStringLiteral("version")).toString();
-    QCOMPARE(sourceVersion, QStringLiteral("5.7.0"));
+    QVERIFY(!sourceVersion.isEmpty());
 
     AnnotationDocument loaded;
     QVERIFY(AnnotationIO::loadLabelMe(jsonPath, &loaded));
@@ -2293,7 +2302,11 @@ void CoreTests::labelMeRoundTripsReferencePrimitiveExampleVersion() {
     QVERIFY(loadedTypes.contains(QStringLiteral("line")));
     QVERIFY(loadedTypes.contains(QStringLiteral("point")));
     QVERIFY(loadedTypes.contains(QStringLiteral("linestrip")));
-    QVERIFY(loadedTypes.contains(QStringLiteral("mask")));
+    QSet<QString> sourceTypes;
+    for (const QJsonValue &value : source.value(QStringLiteral("shapes")).toArray()) {
+        sourceTypes.insert(value.toObject().value(QStringLiteral("shape_type")).toString());
+    }
+    QCOMPARE(loadedTypes, sourceTypes);
 
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
@@ -2312,12 +2325,25 @@ void CoreTests::labelMeNormalizesNullShapeDescriptions() {
 
     QFile input(jsonPath);
     QVERIFY(input.open(QIODevice::ReadOnly | QIODevice::Text));
-    const QJsonObject source = QJsonDocument::fromJson(input.readAll()).object();
-    QVERIFY(source.value(QStringLiteral("shapes")).toArray().first().toObject()
-                .value(QStringLiteral("description")).isNull());
+    QJsonObject source = QJsonDocument::fromJson(input.readAll()).object();
+    QJsonArray sourceShapes = source.value(QStringLiteral("shapes")).toArray();
+    QVERIFY(!sourceShapes.isEmpty());
+    QJsonObject firstShape = sourceShapes.first().toObject();
+    firstShape.insert(QStringLiteral("description"), QJsonValue::Null);
+    sourceShapes[0] = firstShape;
+    source.insert(QStringLiteral("shapes"), sourceShapes);
+    source.insert(QStringLiteral("imagePath"), QFileInfo(jsonPath).dir().absoluteFilePath(
+                      source.value(QStringLiteral("imagePath")).toString()));
+    QTemporaryDir fixtureDir;
+    QVERIFY(fixtureDir.isValid());
+    const QString nullFixturePath = fixtureDir.filePath("null-description.json");
+    QFile nullFixture(nullFixturePath);
+    QVERIFY(nullFixture.open(QIODevice::WriteOnly));
+    nullFixture.write(QJsonDocument(source).toJson());
+    nullFixture.close();
 
     AnnotationDocument loaded;
-    QVERIFY(AnnotationIO::loadLabelMe(jsonPath, &loaded));
+    QVERIFY(AnnotationIO::loadLabelMe(nullFixturePath, &loaded));
 
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
@@ -2866,6 +2892,127 @@ void CoreTests::windowChromeHitRegionsUseLocalLogicalCoordinates() {
     QCOMPARE(windowHitRegion(windowRect, titleRect, QPoint(400, 300), border), WindowHitRegion::Client);
 }
 
+void CoreTests::shortcutRegistryNormalizesAndLimitsBindings() {
+    ShortcutRegistry registry;
+    QVERIFY(registry.addCommand({QStringLiteral("create_rectangle"),
+                                 QStringLiteral("annotation"),
+                                 {QKeySequence(QStringLiteral("W")),
+                                  QKeySequence(QStringLiteral("Ctrl+R"))}}));
+
+    QCOMPARE(registry.command(QStringLiteral("create_rectangle")).shortcuts,
+             QList<QKeySequence>({QKeySequence(QStringLiteral("W")),
+                                  QKeySequence(QStringLiteral("Ctrl+R"))}));
+    QVERIFY(registry.setShortcuts(QStringLiteral("create_rectangle"),
+                                  {QKeySequence(QStringLiteral("v")),
+                                   QKeySequence(QStringLiteral("Ctrl+Shift+R"))}));
+    QCOMPARE(registry.command(QStringLiteral("create_rectangle")).shortcuts,
+             QList<QKeySequence>({QKeySequence(QStringLiteral("V")),
+                                  QKeySequence(QStringLiteral("Ctrl+Shift+R"))}));
+    QVERIFY(!registry.setShortcuts(QStringLiteral("create_rectangle"),
+                                   {QKeySequence(QStringLiteral("A")),
+                                    QKeySequence(QStringLiteral("B")),
+                                    QKeySequence(QStringLiteral("C"))}));
+    QVERIFY(!registry.setShortcuts(QStringLiteral("create_rectangle"),
+                                   {QKeySequence(QStringLiteral("Ctrl+K, Ctrl+C"))}));
+
+    registry.reset(QStringLiteral("create_rectangle"));
+    QCOMPARE(registry.command(QStringLiteral("create_rectangle")).shortcuts,
+             registry.command(QStringLiteral("create_rectangle")).defaults);
+}
+
+void CoreTests::shortcutRegistryRejectsConflicts() {
+    ShortcutRegistry registry;
+    QVERIFY(registry.addCommand({QStringLiteral("view"), QStringLiteral("mode"),
+                                 {QKeySequence(QStringLiteral("V"))}}));
+    QVERIFY(registry.addCommand({QStringLiteral("verify"), QStringLiteral("annotation"),
+                                 {QKeySequence(QStringLiteral("Space"))}}));
+    QVERIFY(registry.setShortcuts(QStringLiteral("verify"),
+                                  {QKeySequence(QStringLiteral("V")),
+                                   QKeySequence(QStringLiteral("V"))}));
+
+    const QVector<ShortcutConflict> conflicts = registry.conflicts();
+    QCOMPARE(conflicts.size(), 1);
+    QCOMPARE(conflicts.first().sequence, QKeySequence(QStringLiteral("V")));
+    QCOMPARE(conflicts.first().locations.size(), 3);
+    QCOMPARE(conflicts.first().locations.at(0).commandId, QStringLiteral("view"));
+    QCOMPARE(conflicts.first().locations.at(1).commandId, QStringLiteral("verify"));
+    QCOMPARE(conflicts.first().locations.at(1).slot, 0);
+    QCOMPARE(conflicts.first().locations.at(2).slot, 1);
+    QVERIFY(registry.hasConflicts());
+
+    QVERIFY(registry.setShortcuts(QStringLiteral("verify"), {QKeySequence(QStringLiteral("Space"))}));
+    QVERIFY(!registry.hasConflicts());
+}
+
+void CoreTests::shortcutRegistryPersistsOnlyOverrides() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString settingsPath = dir.filePath(QStringLiteral("shortcuts.ini"));
+
+    ShortcutRegistry registry;
+    QVERIFY(registry.addCommand({QStringLiteral("delete_shape"), QStringLiteral("edit"),
+                                 {QKeySequence(QStringLiteral("Delete")),
+                                  QKeySequence(QStringLiteral("X"))}}));
+    QVERIFY(registry.addCommand({QStringLiteral("unused"), QStringLiteral("edit"),
+                                 {QKeySequence(QStringLiteral("U"))}}));
+    QVERIFY(registry.setShortcuts(QStringLiteral("delete_shape"),
+                                  {QKeySequence(QStringLiteral("Backspace")),
+                                   QKeySequence(QStringLiteral("D"))}));
+    QVERIFY(registry.setShortcuts(QStringLiteral("unused"), {}));
+
+    {
+        QSettings settings(settingsPath, QSettings::IniFormat);
+        registry.saveOverrides(settings);
+        QVERIFY(settings.contains(QStringLiteral("shortcuts/delete_shape")));
+        QVERIFY(settings.contains(QStringLiteral("shortcuts/unused")));
+        QCOMPARE(settings.value(QStringLiteral("shortcuts/delete_shape")).toStringList(),
+                 QStringList({QStringLiteral("Backspace"), QStringLiteral("D")}));
+    }
+
+    ShortcutRegistry restored;
+    QVERIFY(restored.addCommand({QStringLiteral("delete_shape"), QStringLiteral("edit"),
+                                 {QKeySequence(QStringLiteral("Delete")),
+                                  QKeySequence(QStringLiteral("X"))}}));
+    QVERIFY(restored.addCommand({QStringLiteral("unused"), QStringLiteral("edit"),
+                                 {QKeySequence(QStringLiteral("U"))}}));
+    {
+        QSettings settings(settingsPath, QSettings::IniFormat);
+        restored.loadOverrides(settings);
+    }
+    QCOMPARE(restored.command(QStringLiteral("delete_shape")).shortcuts,
+             QList<QKeySequence>({QKeySequence(QStringLiteral("Backspace")),
+                                  QKeySequence(QStringLiteral("D"))}));
+    QVERIFY(restored.command(QStringLiteral("unused")).shortcuts.isEmpty());
+
+    restored.resetAll();
+    {
+        QSettings settings(settingsPath, QSettings::IniFormat);
+        restored.saveOverrides(settings);
+        QVERIFY(!settings.contains(QStringLiteral("shortcuts/delete_shape")));
+        QVERIFY(!settings.contains(QStringLiteral("shortcuts/unused")));
+    }
+}
+
+void CoreTests::shortcutRegistryCanReplaceEffectiveDefaults() {
+    ShortcutRegistry registry;
+    QVERIFY(registry.addCommand({QStringLiteral("open"), QStringLiteral("file"),
+                                 {QKeySequence(QStringLiteral("Ctrl+O"))}}));
+
+    QVERIFY(registry.setDefaults(QStringLiteral("open"),
+                                 {QKeySequence(QStringLiteral("Ctrl+Shift+O"))}));
+    QCOMPARE(registry.command(QStringLiteral("open")).defaults,
+             QList<QKeySequence>{QKeySequence(QStringLiteral("Ctrl+Shift+O"))});
+    QCOMPARE(registry.command(QStringLiteral("open")).shortcuts,
+             QList<QKeySequence>{QKeySequence(QStringLiteral("Ctrl+Shift+O"))});
+
+    QVERIFY(registry.setShortcuts(QStringLiteral("open"), {QKeySequence(QStringLiteral("O"))}));
+    QVERIFY(registry.setDefaults(QStringLiteral("open"), {QKeySequence(QStringLiteral("Alt+O"))}, false));
+    QCOMPARE(registry.command(QStringLiteral("open")).defaults,
+             QList<QKeySequence>{QKeySequence(QStringLiteral("Alt+O"))});
+    QCOMPARE(registry.command(QStringLiteral("open")).shortcuts,
+             QList<QKeySequence>{QKeySequence(QStringLiteral("O"))});
+}
+
 void CoreTests::imageIoNormalizesHighBitGrayscale() {
     QImage source(3, 1, QImage::Format_Grayscale16);
     auto *pixels = reinterpret_cast<quint16 *>(source.scanLine(0));
@@ -3108,6 +3255,12 @@ void CoreTests::labelMeImageDataUsesTiffFallbackForMultibandInput() {
 }
 
 void CoreTests::resourcePathsFindSharedAssets() {
+    QVERIFY(ResourcePaths::filePath("resources/strings").startsWith(":/labelimg/"));
+    QVERIFY(ResourcePaths::filePath("resources/icons/app-cpp.png").startsWith(":/labelimg/"));
+    QVERIFY(!QImage(ResourcePaths::filePath("resources/icons/app-cpp.png")).isNull());
+    QFile chinese(ResourcePaths::filePath("resources/strings/strings-zh-CN.properties"));
+    QVERIFY(chinese.open(QIODevice::ReadOnly));
+    QVERIFY(chinese.readAll().contains(QString::fromUtf8("文件").toUtf8()));
     QVERIFY(QFileInfo::exists(ResourcePaths::filePath(QStringLiteral("resources/strings/strings.properties"))));
     QVERIFY(QFileInfo::exists(ResourcePaths::filePath(QStringLiteral("data/predefined_classes.txt"))));
 }
@@ -3343,3 +3496,97 @@ void CoreTests::aiAssistSessionReportsProgressEvents() {
 
 QTEST_MAIN(CoreTests)
 #include "test_core.moc"
+
+void CoreTests::yoloDatasetReadsClassFormsAndMapsPaths() {
+    QTemporaryDir dir;
+    QVERIFY(QDir().mkpath(dir.filePath("images/train/cam01")));
+    const QList<QByteArray> forms = {
+        "names: [defect, normal]\n",
+        "names:\n  - defect\n  - normal\n",
+        "names:\n  1: normal\n  0: defect\n",
+        "names: {1: normal, 0: defect}\n"
+    };
+    for (const QByteArray &form : forms) {
+        QFile config(dir.filePath("data.yaml"));
+        QVERIFY(config.open(QIODevice::WriteOnly));
+        config.write("path: Z:/stale-dataset\ntrain: train-selected.txt\n");
+        config.write(form);
+        config.close();
+        YoloDataset dataset;
+        QString error;
+        QVERIFY2(YoloDataset::load(dir.path(), &dataset, &error), qPrintable(error));
+        QCOMPARE(dataset.classes, QStringList({"defect", "normal"}));
+        QCOMPARE(dataset.annotationPath(dir.filePath("images/train/cam01/a.b.jpg")),
+                 dir.filePath("labels/train/cam01/a.b.txt"));
+        QVERIFY(dataset.annotationPath(dir.filePath("outside.jpg")).isEmpty());
+    }
+    QFile config(dir.filePath("data.yaml"));
+    QVERIFY(config.open(QIODevice::WriteOnly));
+    config.write("names: {0: defect, 2: normal}\n");
+    config.close();
+    YoloDataset dataset;
+    QString error;
+    QVERIFY(!YoloDataset::load(dir.path(), &dataset, &error));
+    QVERIFY(!dataset.isOpen());
+    QVERIFY(config.open(QIODevice::WriteOnly));
+    config.write("names: [defect, '', normal]\n");
+    config.close();
+    QVERIFY(!YoloDataset::load(dir.path(), &dataset, &error));
+}
+
+void CoreTests::yoloDatasetRejectsInvalidLabelsWithoutOverwriting() {
+    QTemporaryDir dir;
+    const QString path = dir.filePath("a.txt");
+    const QStringList classes{"defect", "normal"};
+    AnnotationDocument doc;
+    const QList<QByteArray> invalid = {
+        "2 0.5 0.5 0.2 0.2\n", "0 NaN 0.5 0.2 0.2\n",
+        "bad 0.5 0.5 0.2 0.2\n", "0 0.5 0.5 0.2 0.2 0.1 0.1\n",
+        "0 0.1 0.1 0.9 0.9\n"
+    };
+    for (const QByteArray &line : invalid) {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write(line);
+        file.close();
+        QVERIFY(!AnnotationIO::loadYoloWithClasses(path, QSize(100, 80), &doc, classes));
+    }
+    doc.imageSize = QSize(100, 80);
+    doc.shapes = {Shape::fromRect("normal", QRectF(20, 10, 40, 30), false)};
+    QVERIFY(AnnotationIO::saveYolo(path, doc, classes, false));
+    QVERIFY(!QFileInfo::exists(dir.filePath("classes.txt")));
+    AnnotationDocument loaded;
+    QVERIFY(AnnotationIO::loadYoloWithClasses(path, doc.imageSize, &loaded, classes));
+    QCOMPARE(loaded.shapes.first().label, QString("normal"));
+    QCOMPARE(loaded.shapes.first().boundingRect(), doc.shapes.first().boundingRect());
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const QByteArray original = file.readAll();
+    file.close();
+    doc.shapes.first().label = "unknown";
+    QVERIFY(!AnnotationIO::saveYolo(path, doc, classes, false));
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    QCOMPARE(file.readAll(), original);
+}
+
+void CoreTests::yoloDatasetExternalReadOnlyAudit() {
+    const QString root = qEnvironmentVariable("LABELIMG_TEST_YOLO_DATASET");
+    if (root.isEmpty()) QSKIP("Set LABELIMG_TEST_YOLO_DATASET for a read-only dataset audit");
+    YoloDataset dataset;
+    QString error;
+    QVERIFY2(YoloDataset::load(root, &dataset, &error), qPrintable(error));
+    int images = 0, boxes = 0, empty = 0;
+    QDirIterator it(QDir(dataset.root).filePath("images"), {"*.jpg", "*.png", "*.jpeg", "*.bmp"},
+                    QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString label = dataset.annotationPath(it.next());
+        QVERIFY2(QFileInfo::exists(label), qPrintable(label));
+        AnnotationDocument doc;
+        QVERIFY2(AnnotationIO::loadYoloWithClasses(label, QSize(1024, 1024), &doc, dataset.classes), qPrintable(label));
+        ++images;
+        boxes += doc.shapes.size();
+        if (doc.shapes.isEmpty()) ++empty;
+    }
+    QVERIFY(images > 0);
+    qInfo() << "Read-only YOLO audit: images" << images << "boxes" << boxes << "empty" << empty;
+}

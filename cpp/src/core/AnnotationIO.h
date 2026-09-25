@@ -31,7 +31,8 @@ public:
     static bool savePascalVoc(const QString &path, const AnnotationDocument &document);
 
     static bool loadYolo(const QString &path, const QSize &imageSize, AnnotationDocument *document, const QString &classListPath = {});
-    static bool saveYolo(const QString &path, const AnnotationDocument &document, QStringList classList = {});
+    static bool loadYoloWithClasses(const QString &path, const QSize &imageSize, AnnotationDocument *document, const QStringList &classes);
+    static bool saveYolo(const QString &path, const AnnotationDocument &document, QStringList classList = {}, bool writeClasses = true);
 
     static bool loadCreateMl(const QString &path, const QString &imagePath, AnnotationDocument *document);
     static bool saveCreateMl(const QString &path, const AnnotationDocument &document);

@@ -2,6 +2,10 @@
 #include <QtWidgets>
 
 #include <QBuffer>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <windowsx.h>
+#endif
 
 #include "core/AnnotationIO.h"
 #include "core/LabelMeConfig.h"
@@ -10,6 +14,8 @@
 #include "ui/Canvas.h"
 #include "ui/MiniMapOverlay.h"
 #include "ui/MainWindow.h"
+#include "ui/ShortcutCaptureEdit.h"
+#include "ui/OnnxDetectionDialog.h"
 
 #ifdef Q_OS_WIN
 #define WIN32_LEAN_AND_MEAN
@@ -20,6 +26,18 @@ class UiTests : public QObject {
     Q_OBJECT
 
 private slots:
+    void performanceAudit();
+    void mainWindowDefaultsToChineseAndPreservesLanguageChoice();
+    void mainWindowOnnxDetectionImportsUndoAndSave();
+    void onnxDialogRejectsDatasetMismatchAndResetsOnPathChange();
+    void mainWindowYoloDatasetEditsMappedLabels();
+    void mainWindowDetectsDatasetAndFallsBack_data();
+    void mainWindowDetectsDatasetAndFallsBack();
+    void mainWindowOrdinaryDirectoryDoesNotPrompt_data();
+    void mainWindowOrdinaryDirectoryDoesNotPrompt();
+    void mainWindowThumbnailsLoadOnlyVisibleRowsAndRefreshAfterSave();
+    void mainWindowDrawingDoesNotReadClipboardRepeatedly();
+    void canvasOverviewUpdatesOnImageReplacement();
     void init();
     void canvasCreatesAndCancelsShapes();
     void canvasStartsInEditModeLikeLabelMe();
@@ -36,6 +54,7 @@ private slots:
     void canvasShiftCreatesLabelMeSquare();
     void canvasShiftResizesRectangleAsSquare();
     void canvasCreateModeCrosshairCanBeToggled();
+    void canvasCreateCrosshairRepaintsWhenMouseMovesWithoutButtons();
     void canvasCrosshairCanBeConfiguredPerCreateShape();
     void canvasDoubleClickCloseCanBeToggled();
     void canvasPointSizeCanBeConfigured();
@@ -181,6 +200,7 @@ private slots:
     void mainWindowFileListTextsRefreshLanguage();
     void miniMapDrawsVisibleShapeBoxes();
     void miniMapIsSemiTransparentUntilHovered();
+    void miniMapDoesNotContinuouslyRepaintIdleCanvas();
     void mainWindowFpsUsesFrameCadenceNotRenderDuration();
     void mainWindowMiniMapClickChangesScrollbars();
     void mainWindowRestoresScrollPositionPerImage();
@@ -210,7 +230,13 @@ private slots:
     void mainWindowCtrlJIsViewModeAndVTogglesEditability();
     void mainWindowOnlyActiveCreateActionIsDisabled();
     void mainWindowPShortcutCreatesPolygonShape();
+    void mainWindowWRepeatsLastCreateMode();
     void mainWindowProvidesLabelMeCreateShortcuts();
+    void mainWindowAppliesPersistedShortcutOverrides();
+    void mainWindowBareShortcutsDoNotStealTextInput();
+    void shortcutCaptureEditAcceptsSingleKeysAndCanClear();
+    void mainWindowSettingsUsesCategoryNavigationAndShortcutPage();
+    void mainWindowSettingsRejectsShortcutConflictsAndAppliesValidBinding();
     void mainWindowProvidesSynchronizedZoomWidget();
     void mainWindowShortcutZoomKeepsViewportCenter();
     void mainWindowShortcutZoomUsesLabelMeMultiplicativeSteps();
@@ -230,6 +256,8 @@ private slots:
     void mainWindowAiTextPromptCreatesFilteredShapes();
     void mainWindowAiTextPromptIgnoresDifferentExistingLabels();
     void mainWindowQESelectPreviousNextBoxAndToggleSingleSelection();
+    void mainWindowQERevealsOffscreenAnnotations_data();
+    void mainWindowQERevealsOffscreenAnnotations();
     void mainWindowXDeletesCurrentShape();
     void mainWindowDeleteAllShapesActionClearsAndUndoRestores();
     void mainWindowDuplicateUsesSelectedShapesWithoutOffset();
@@ -247,6 +275,7 @@ private slots:
     void mainWindowEditLabelDialogDefaultsToCurrentLabel();
     void mainWindowLabelEditDialogUsesCurrentLanguageForMetadataFields();
     void mainWindowBlankLabelKeepsEditDialogOpen();
+    void mainWindowSpaceConfirmsSelectedLabelAndPreservesTextSpaces();
     void mainWindowLabelEditArrowKeysNavigateLabelList();
     void mainWindowLabelEditCompleterAutocompletesPrefix();
     void mainWindowEditLabelDialogEditsLabelMeMetadata();
@@ -338,6 +367,10 @@ private slots:
     void mainWindowLoadsExifOrientationForCanvas();
     void mainWindowAcceptsImageDropAndImportsFiles();
     void mainWindowNextPreviousKeepsFileListSelection();
+    void mainWindowNextAtEndShowsNoticeWithoutReloading_data();
+    void mainWindowNextAtEndShowsNoticeWithoutReloading();
+    void mainWindowMissingImageReloadsQueue_data();
+    void mainWindowMissingImageReloadsQueue();
     void mainWindowCtrlShiftNavigationCopiesPreviousShapes();
     void mainWindowRestoresPersistedLabelHistory();
     void mainWindowRestoresDefaultLabelSettings();
@@ -577,6 +610,14 @@ void UiTests::canvasCreatesAndCancelsShapes() {
     QTest::keyClick(&canvas, Qt::Key_Escape);
 
     QCOMPARE(canvas.shapes().size(), 1);
+    QVERIFY(!canvas.isDrawing());
+    QCOMPARE(canvas.cursor().shape(), Qt::ArrowCursor);
+    QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(80, 80));
+    QTest::mousePress(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(60, 60));
+    QTest::mouseMove(&canvas, QPoint(90, 90));
+    QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(90, 90));
+    QCOMPARE(canvas.shapes().size(), 1);
+    QCOMPARE(canvas.shapes().first().boundingRect().toRect(), QRect(10, 10, 40, 30));
 }
 
 void UiTests::canvasStartsInEditModeLikeLabelMe() {
@@ -908,6 +949,31 @@ void UiTests::canvasShiftResizesRectangleAsSquare() {
     QCOMPARE(canvas.shapes().first().groupId, 7);
     QCOMPARE(canvas.shapes().first().description, QStringLiteral("keep metadata"));
     QCOMPARE(canvas.shapes().first().flags.value(QStringLiteral("reviewed")), true);
+}
+
+void UiTests::canvasCreateCrosshairRepaintsWhenMouseMovesWithoutButtons() {
+    Canvas canvas;
+    QPixmap pixmap(200, 160);
+    pixmap.fill(Qt::black);
+    canvas.setPixmap(pixmap);
+    canvas.resize(200, 160);
+    canvas.setCreateMode(true);
+    canvas.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&canvas));
+    QTest::qWait(50);
+    QSignalSpy frames(&canvas, &Canvas::frameRendered);
+    const QPointF position(120, 90);
+    QMouseEvent move(QEvent::MouseMove, position, canvas.mapToGlobal(position.toPoint()),
+                     Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(&canvas, &move);
+    QTest::qWait(50);
+    QVERIFY2(frames.count() > 0, "Moving the crosshair must schedule a repaint without a mouse button press");
+    const QImage rendered = canvas.grab().toImage();
+    int linePixels = 0;
+    for (int y = 0; y < 70; ++y) {
+        if (qGray(rendered.pixel(120, y)) > 40) ++linePixels;
+    }
+    QVERIFY(linePixels > 20);
 }
 
 void UiTests::canvasCreateModeCrosshairCanBeToggled() {
@@ -4689,7 +4755,7 @@ void UiTests::mainWindowFooterContainsModeFormatAndMiniMapControls() {
     QVERIFY(toolBar);
     QAction *viewModeAction = window.findChild<QAction *>(QStringLiteral("viewModeAction"));
     QAction *editModeAction = window.findChild<QAction *>(QStringLiteral("editModeAction"));
-    QAction *createModeAction = actionByShortcut(&window, QKeySequence(QStringLiteral("W")));
+    QAction *createModeAction = window.findChild<QAction *>(QStringLiteral("createModeAction"));
     QAction *miniMapAction = window.findChild<QAction *>(QStringLiteral("miniMapAction"));
     QAction *formatAction = window.findChild<QAction *>(QStringLiteral("formatAction"));
     QToolButton *mainModeButton = window.findChild<QToolButton *>(QStringLiteral("mainModeButton"));
@@ -4781,7 +4847,7 @@ void UiTests::mainWindowFooterControlsRefreshLanguage() {
     QCOMPARE(editShortcut->text(), QStringLiteral("Edit"));
     QCOMPARE(editShortcut->toolTip(), QStringLiteral("Edit mode"));
     QCOMPARE(createShortcut->text(), QStringLiteral("W"));
-    QCOMPARE(createShortcut->toolTip(), QStringLiteral("Create box"));
+    QCOMPARE(createShortcut->toolTip(), QStringLiteral("Repeat the last creation tool; defaults to a rectangle"));
 
     simplifiedChinese->trigger();
     QCOMPARE(modeCombo->itemText(modeCombo->findData(QStringLiteral("view"))), QString::fromUtf8("查看 (V)"));
@@ -4791,7 +4857,7 @@ void UiTests::mainWindowFooterControlsRefreshLanguage() {
     QCOMPARE(editShortcut->text(), QString::fromUtf8("编辑"));
     QCOMPARE(editShortcut->toolTip(), QString::fromUtf8("编辑模式"));
     QCOMPARE(createShortcut->text(), QString::fromUtf8("W"));
-    QCOMPARE(createShortcut->toolTip(), QString::fromUtf8("新建框"));
+    QCOMPARE(createShortcut->toolTip(), QString::fromUtf8("重复上一次的创建方式；没有记录时创建矩形框"));
 }
 
 void UiTests::mainWindowHelpMenuIncludesTutorialAction() {
@@ -4888,11 +4954,12 @@ void UiTests::mainWindowSettingsDialogUsesActiveLanguage() {
             return;
         }
         inspected = true;
-        auto *tabs = dialog->findChild<QTabWidget *>();
+        auto *categories = dialog->findChild<QListWidget *>(QStringLiteral("settingsCategoryList"));
         auto *displayLabelPopup = dialog->findChild<QCheckBox *>(QStringLiteral("settingsDisplayLabelPopup"));
-        correct = tabs && displayLabelPopup &&
-                  tabs->tabText(0) == QStringLiteral("General") &&
-                  tabs->tabText(1) == QStringLiteral("View & Annotation") &&
+        correct = categories && displayLabelPopup && categories->count() == 3 &&
+                  categories->item(0)->text() == QStringLiteral("General") &&
+                  categories->item(1)->text() == QStringLiteral("View & Annotation") &&
+                  categories->item(2)->text() == QStringLiteral("Shortcuts") &&
                   displayLabelPopup->text() == QStringLiteral("Show label editor when creating annotation");
         dialog->reject();
     });
@@ -5046,9 +5113,11 @@ void UiTests::mainWindowTitleBarUsesStandardWindowControls() {
     QVERIFY(maximizeButton);
     QVERIFY(closeButton);
 
-    QCOMPARE(minimizeButton->text(), QString::fromUtf8("\u2212"));
-    QCOMPARE(maximizeButton->text(), QString::fromUtf8("\u25a1"));
-    QCOMPARE(closeButton->text(), QString::fromUtf8("\u00d7"));
+    for (QToolButton *button : {minimizeButton, maximizeButton, closeButton}) {
+        QVERIFY(button->text().isEmpty());
+        QVERIFY(!button->icon().pixmap(16, 16).isNull());
+        QVERIFY(!button->accessibleName().isEmpty());
+    }
     QVERIFY(minimizeButton->width() >= 40);
     QVERIFY(maximizeButton->width() >= 40);
     QVERIFY(closeButton->width() >= 40);
@@ -5149,6 +5218,23 @@ void UiTests::miniMapIsSemiTransparentUntilHovered() {
     miniMap.render(&hovered);
     QVERIFY2(hovered.pixelColor(hovered.rect().center()).alpha() > idle.pixelColor(idle.rect().center()).alpha(),
              qPrintable(hovered.pixelColor(hovered.rect().center()).name(QColor::HexArgb)));
+}
+
+void UiTests::miniMapDoesNotContinuouslyRepaintIdleCanvas() {
+    auto *canvas = new Canvas;
+    QPixmap pixmap(800, 600);
+    pixmap.fill(Qt::white);
+    canvas->setPixmap(pixmap);
+    QScrollArea scrollArea;
+    scrollArea.setWidget(canvas);
+    scrollArea.resize(500, 400);
+    MiniMapOverlay miniMap(canvas, &scrollArea, scrollArea.viewport());
+    scrollArea.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&scrollArea));
+    QTest::qWait(100);
+    QSignalSpy frames(canvas, &Canvas::frameRendered);
+    QTest::qWait(200);
+    QVERIFY2(frames.count() < 5, qPrintable(QStringLiteral("Idle canvas rendered %1 frames").arg(frames.count())));
 }
 
 void UiTests::mainWindowFpsUsesFrameCadenceNotRenderDuration() {
@@ -5384,8 +5470,11 @@ void UiTests::mainWindowViewMenuRestoresClosedRightDocks() {
     QVERIFY(showFileDockAction);
     QVERIFY(showLabelDockAction);
     QVERIFY(viewMenu);
-    QVERIFY(viewMenu->actions().contains(showFileDockAction));
-    QVERIFY(viewMenu->actions().contains(showLabelDockAction));
+    QMenu *panelsMenu = window.findChild<QMenu *>(QStringLiteral("menu_panelsLayout"));
+    QVERIFY(panelsMenu);
+    QVERIFY(viewMenu->actions().contains(panelsMenu->menuAction()));
+    QVERIFY(panelsMenu->actions().contains(showFileDockAction));
+    QVERIFY(panelsMenu->actions().contains(showLabelDockAction));
 
     fileDock->hide();
     labelDock->hide();
@@ -5707,9 +5796,7 @@ void UiTests::mainWindowCanvasContextMenuIncludesAllCreateModes() {
         QStringLiteral("createMaskModeAction")};
     QList<QAction *> expectedActions;
     for (const QString &name : actionNames) {
-        QAction *action = name == QStringLiteral("createModeAction")
-                              ? actionByShortcut(&window, QKeySequence(QStringLiteral("W")))
-                              : window.findChild<QAction *>(name);
+        QAction *action = window.findChild<QAction *>(name);
         QVERIFY(action);
         expectedActions.append(action);
     }
@@ -5812,13 +5899,15 @@ void UiTests::mainWindowFileThumbnailModeDefaultsOffAndCanToggle() {
     QCOMPARE(fileList->count(), 2);
     QVERIFY(fileList->item(0)->icon().isNull());
 
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
     thumbnailAction->trigger();
 
     QVERIFY(thumbnailAction->isChecked());
     QCOMPARE(fileList->viewMode(), QListView::ListMode);
     QCOMPARE(fileList->iconSize(), QSize(72, 54));
     QCOMPARE(fileList->count(), 2);
-    QVERIFY(!fileList->item(0)->icon().isNull());
+    QTRY_VERIFY(!fileList->item(0)->icon().isNull());
     QVERIFY(fileList->item(0)->sizeHint().height() >= 60);
     QCOMPARE(QFileInfo(fileList->item(0)->text()).fileName(), QString("a.jpg"));
 
@@ -5850,9 +5939,11 @@ void UiTests::mainWindowFileThumbnailsDrawAnnotationBoxes() {
     QVERIFY(fileList);
     QVERIFY(thumbnailAction);
 
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
     thumbnailAction->trigger();
     QCOMPARE(fileList->count(), 1);
-    QVERIFY(!fileList->item(0)->icon().isNull());
+    QTRY_VERIFY(!fileList->item(0)->icon().isNull());
     const QImage thumbnail = fileList->item(0)->icon().pixmap(fileList->iconSize()).toImage();
 
     QVERIFY2(countPreviewBoxPixels(thumbnail) > 8, "File thumbnail did not render annotation boxes");
@@ -6196,7 +6287,7 @@ void UiTests::mainWindowVShortcutSwitchesToViewMode() {
     QVERIFY(QTest::qWaitForWindowExposed(&window));
 
     QAction *viewModeAction = actionByShortcut(&window, QKeySequence(QStringLiteral("V")));
-    QAction *createModeAction = actionByShortcut(&window, QKeySequence(QStringLiteral("W")));
+    QAction *createModeAction = window.findChild<QAction *>(QStringLiteral("createModeAction"));
     QAction *editModeAction = window.findChild<QAction *>(QStringLiteral("editModeAction"));
     QVERIFY(viewModeAction);
     QVERIFY(createModeAction);
@@ -6238,7 +6329,7 @@ void UiTests::mainWindowCtrlJIsViewModeAndVTogglesEditability() {
     QAction *viewModeAction = actionByShortcut(&window, QKeySequence(QStringLiteral("V")));
     QAction *editabilityAction = window.findChild<QAction *>(QStringLiteral("editabilityAction"));
     QAction *editModeAction = window.findChild<QAction *>(QStringLiteral("editModeAction"));
-    QAction *createModeAction = actionByShortcut(&window, QKeySequence(QStringLiteral("W")));
+    QAction *createModeAction = window.findChild<QAction *>(QStringLiteral("createModeAction"));
     QComboBox *modeCombo = window.findChild<QComboBox *>(QStringLiteral("footerModeCombo"));
     Canvas *canvas = window.findChild<Canvas *>();
     QVERIFY(viewModeAction);
@@ -6330,6 +6421,80 @@ void UiTests::mainWindowOnlyActiveCreateActionIsDisabled() {
     }
 }
 
+void UiTests::mainWindowWRepeatsLastCreateMode() {
+    resetTestSettings("repeat-create-shortcut");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QImage image(120, 100, QImage::Format_RGB32);
+    image.fill(Qt::white);
+    const QString path = dir.filePath("repeat.jpg");
+    QVERIFY(image.save(path));
+    MainWindow window;
+    window.loadStartupArgs({"labelImgCpp", path});
+    window.show();
+    window.activateWindow();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    auto *canvas = window.findChild<Canvas *>();
+    auto *repeat = window.findChild<QAction *>("repeatCreateAction");
+    auto *rectangle = window.findChild<QAction *>("createModeAction");
+    auto *polygon = window.findChild<QAction *>("createPolygonModeAction");
+    auto *edit = window.findChild<QAction *>("editModeAction");
+    auto *footer = window.findChild<QToolButton *>("footerCreateShortcut");
+    QVERIFY(canvas && repeat && rectangle && polygon && edit && footer);
+    canvas->setFocus();
+    QTest::keyClick(canvas, Qt::Key_W);
+    QVERIFY(rectangle->isChecked());
+    QCOMPARE(canvas->createShapeType(), QStringLiteral("rectangle"));
+
+    polygon->trigger();
+    acceptNextLabelPrompt(QStringLiteral("poly"));
+    QTest::mouseClick(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(10, 10));
+    QVERIFY(!repeat->isEnabled());
+    QTest::keyClick(canvas, Qt::Key_W);
+    QVERIFY(canvas->isDrawing());
+    QTest::mouseClick(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(80, 12));
+    QTest::mouseClick(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(70, 55));
+    QTest::keyClick(canvas, Qt::Key_Return);
+    QCOMPARE(canvas->shapes().size(), 1);
+    QVERIFY(edit->isChecked());
+    QVERIFY(repeat->isEnabled());
+    QVERIFY(!canvas->isDrawing());
+    window.activateWindow();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    canvas->setFocus();
+    QTest::keyClick(canvas, Qt::Key_W);
+    QVERIFY(polygon->isChecked());
+    QCOMPARE(canvas->createShapeType(), QStringLiteral("polygon"));
+    edit->trigger();
+    QTest::mouseClick(footer, Qt::LeftButton);
+    QVERIFY(polygon->isChecked());
+    canvas->setFocus();
+    QTest::keyClick(canvas, Qt::Key_R, Qt::ControlModifier);
+    QVERIFY(rectangle->isChecked());
+    edit->trigger();
+    QTest::keyClick(canvas, Qt::Key_W);
+    QVERIFY(rectangle->isChecked());
+    auto *view = window.findChild<QAction *>("viewModeAction");
+    QVERIFY(view);
+    QTest::keyClick(canvas, Qt::Key_Escape);
+    QVERIFY(view->isChecked());
+    QVERIFY(!rectangle->isChecked());
+    QVERIFY(!edit->isChecked());
+    QCOMPARE(canvas->cursor().shape(), Qt::ArrowCursor);
+
+    QTest::keyClick(canvas, Qt::Key_W);
+    QVERIFY(rectangle->isChecked());
+    QTest::mousePress(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(15, 15));
+    QTest::mouseMove(canvas, QPoint(45, 45));
+    QVERIFY(canvas->isDrawing());
+    QTest::keyClick(canvas, Qt::Key_Escape);
+    QVERIFY(view->isChecked());
+    QVERIFY(!canvas->isDrawing());
+    QCOMPARE(canvas->shapes().size(), 1);
+    QCOMPARE(canvas->shapes().first().shapeType, QStringLiteral("polygon"));
+    QTest::mouseRelease(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(45, 45));
+}
+
 void UiTests::mainWindowPShortcutCreatesPolygonShape() {
     resetTestSettings("p-shortcut-create-polygon");
     QSettings settings;
@@ -6389,6 +6554,133 @@ void UiTests::mainWindowProvidesLabelMeCreateShortcuts() {
     QVERIFY(saveDirAction->shortcuts().contains(QKeySequence(QStringLiteral("Ctrl+Shift+R"))));
     QVERIFY(!saveDirAction->shortcuts().contains(QKeySequence(QStringLiteral("Ctrl+R"))));
     QCOMPARE(undoLastPointAction->shortcut(), QKeySequence::Undo);
+}
+
+void UiTests::mainWindowAppliesPersistedShortcutOverrides() {
+    resetTestSettings("persisted-shortcut-overrides");
+    QSettings settings;
+    settings.setValue(QStringLiteral("shortcuts/view_mode"), QStringList{QStringLiteral("B")});
+    settings.setValue(QStringLiteral("shortcuts/undo"), QStringList{QStringLiteral("Ctrl+Alt+Z")});
+
+    MainWindow window;
+    auto *viewAction = window.findChild<QAction *>(QStringLiteral("viewModeAction"));
+    auto *undoLastPointAction = window.findChild<QAction *>(QStringLiteral("undoLastPointAction"));
+    auto *viewShortcut = window.findChild<QToolButton *>(QStringLiteral("footerViewShortcut"));
+    QVERIFY(viewAction);
+    QVERIFY(undoLastPointAction);
+    QVERIFY(viewShortcut);
+    QCOMPARE(viewAction->property("shortcutCommandId").toString(), QStringLiteral("view_mode"));
+    QCOMPARE(viewAction->shortcuts(), QList<QKeySequence>{QKeySequence(QStringLiteral("B"))});
+    QCOMPARE(undoLastPointAction->property("shortcutCommandId").toString(), QStringLiteral("undo"));
+    QCOMPARE(undoLastPointAction->shortcuts(),
+             QList<QKeySequence>{QKeySequence(QStringLiteral("Ctrl+Alt+Z"))});
+    QCOMPARE(viewShortcut->text(), QStringLiteral("B"));
+}
+
+void UiTests::mainWindowBareShortcutsDoNotStealTextInput() {
+    resetTestSettings("bare-shortcuts-text-input");
+    MainWindow window;
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+    auto *createAction = window.findChild<QAction *>(QStringLiteral("createModeAction"));
+    QVERIFY(createAction);
+    QVERIFY(!createAction->isChecked());
+
+    QLineEdit edit(&window);
+    edit.show();
+    edit.setFocus();
+    QTRY_VERIFY(edit.hasFocus());
+    QTest::keyClick(&edit, Qt::Key_W);
+    QCOMPARE(edit.text(), QStringLiteral("w"));
+    QVERIFY(!createAction->isChecked());
+}
+
+void UiTests::shortcutCaptureEditAcceptsSingleKeysAndCanClear() {
+    ShortcutCaptureEdit edit;
+    edit.setSequence(QKeySequence(QStringLiteral("W")));
+    QCOMPARE(edit.sequence(), QKeySequence(QStringLiteral("W")));
+
+    edit.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&edit));
+    edit.setFocus();
+    QTest::keyClick(&edit, Qt::Key_B, Qt::ControlModifier | Qt::ShiftModifier);
+    QCOMPARE(edit.sequence(), QKeySequence(QStringLiteral("Ctrl+Shift+B")));
+
+    QTest::keyClick(&edit, Qt::Key_Escape);
+    QCOMPARE(edit.sequence(), QKeySequence(QStringLiteral("Ctrl+Shift+B")));
+    QTest::keyClick(&edit, Qt::Key_Backspace);
+    QVERIFY(edit.sequence().isEmpty());
+}
+
+void UiTests::mainWindowSettingsUsesCategoryNavigationAndShortcutPage() {
+    resetTestSettings("settings-category-navigation");
+    MainWindow window;
+    auto *settingsAction = window.findChild<QAction *>(QStringLiteral("settingsAction"));
+    QVERIFY(settingsAction);
+
+    QTimer::singleShot(60, []() {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        auto *categories = dialog->findChild<QListWidget *>(QStringLiteral("settingsCategoryList"));
+        auto *pages = dialog->findChild<QStackedWidget *>(QStringLiteral("settingsPages"));
+        auto *table = dialog->findChild<QTableWidget *>(QStringLiteral("shortcutTable"));
+        auto *search = dialog->findChild<QLineEdit *>(QStringLiteral("shortcutSearch"));
+        auto *restore = dialog->findChild<QPushButton *>(QStringLiteral("shortcutRestoreAll"));
+        QVERIFY(categories);
+        QVERIFY(pages);
+        QVERIFY(table);
+        QVERIFY(search);
+        QVERIFY(restore);
+        QCOMPARE(categories->count(), 3);
+        QVERIFY(table->rowCount() >= 30);
+        categories->setCurrentRow(2);
+        QCOMPARE(pages->currentIndex(), 2);
+        dialog->reject();
+    });
+    settingsAction->trigger();
+}
+
+void UiTests::mainWindowSettingsRejectsShortcutConflictsAndAppliesValidBinding() {
+    resetTestSettings("settings-shortcut-conflict");
+    MainWindow window;
+    auto *settingsAction = window.findChild<QAction *>(QStringLiteral("settingsAction"));
+    auto *openAction = actionByShortcut(&window, QKeySequence::Open);
+    QVERIFY(settingsAction);
+    QVERIFY(openAction);
+
+    QTimer::singleShot(60, []() {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        auto *table = dialog->findChild<QTableWidget *>(QStringLiteral("shortcutTable"));
+        auto *buttons = dialog->findChild<QDialogButtonBox *>(QStringLiteral("settingsButtons"));
+        QVERIFY(table);
+        QVERIFY(buttons);
+        QPushButton *ok = buttons->button(QDialogButtonBox::Ok);
+        QVERIFY(ok);
+
+        ShortcutCaptureEdit *openEditor = nullptr;
+        for (int row = 0; row < table->rowCount(); ++row) {
+            if (table->item(row, 0)->data(Qt::UserRole).toString() == QStringLiteral("open")) {
+                openEditor = qobject_cast<ShortcutCaptureEdit *>(table->cellWidget(row, 1));
+                break;
+            }
+        }
+        QVERIFY(openEditor);
+        openEditor->setFocus();
+        QTest::keyClick(openEditor, Qt::Key_W);
+        QVERIFY(!ok->isEnabled());
+        QVERIFY(openEditor->property("shortcutConflict").toBool());
+
+        QTest::keyClick(openEditor, Qt::Key_B);
+        QVERIFY(ok->isEnabled());
+        ok->click();
+    });
+    settingsAction->trigger();
+
+    QCOMPARE(openAction->shortcuts(), QList<QKeySequence>{QKeySequence(QStringLiteral("B"))});
+    QCOMPARE(QSettings().value(QStringLiteral("shortcuts/open")).toStringList(),
+             QStringList{QStringLiteral("B")});
 }
 
 void UiTests::mainWindowProvidesSynchronizedZoomWidget() {
@@ -7144,6 +7436,100 @@ void UiTests::mainWindowAiTextPromptIgnoresDifferentExistingLabels() {
     QVERIFY(labels.contains(QStringLiteral("cat")));
     QVERIFY(labels.contains(QStringLiteral("person")));
     QVERIFY(labels.contains(QStringLiteral("sofa")));
+}
+
+void UiTests::mainWindowQERevealsOffscreenAnnotations_data() {
+    QTest::addColumn<double>("scale");
+    QTest::newRow("original-size") << 1.0;
+    QTest::newRow("zoomed") << 2.0;
+}
+
+void UiTests::mainWindowQERevealsOffscreenAnnotations() {
+    QFETCH(double, scale);
+    resetTestSettings("qe-reveal-offscreen");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QImage image(2400, 1800, QImage::Format_RGB32);
+    image.fill(Qt::white);
+    const QString path = dir.filePath("image.png");
+    QVERIFY(image.save(path));
+    const QVector<Shape> shapes{
+        Shape::fromRect("near", QRectF(50, 50, 40, 30), false),
+        Shape::fromRect("far", QRectF(1600, 1200, 40, 30), false),
+        Shape::fromRect("near-far", QRectF(1650, 1240, 40, 30), false)};
+    AnnotationDocument document;
+    document.imagePath = path;
+    document.imageSize = image.size();
+    document.shapes = shapes;
+    const QString annotationPath = dir.filePath("image.xml");
+    QVERIFY(AnnotationIO::savePascalVoc(annotationPath, document));
+    MainWindow window;
+    window.resize(1100, 800);
+    QVERIFY(window.openPath(path));
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *canvas = window.findChild<Canvas *>();
+    auto *scroll = window.findChild<QScrollArea *>("scrollArea");
+    auto *zoom = window.findChild<QSpinBox *>("zoomWidget");
+    auto *labels = window.findChild<QListWidget *>("labelList");
+    QVERIFY(canvas && scroll && zoom && labels);
+    zoom->setValue(qRound(scale * 100));
+    QCoreApplication::processEvents();
+    QCOMPARE(canvas->scale(), scale);
+    QCOMPARE(canvas->shapes().size(), 3);
+    QCOMPARE(labels->count(), 3);
+    canvas->setCurrentIndex(0);
+    auto visible = [&] {
+        return QRectF(canvas->mapFrom(scroll->viewport(), QPoint(0, 0)), scroll->viewport()->size());
+    };
+    auto target = [&](int index) {
+        const QRectF bounds = shapes[index].boundingRect();
+        const QPointF origin = canvas->imageOriginOffset();
+        return QRectF((bounds.topLeft() + origin) * scale, (bounds.bottomRight() + origin) * scale);
+    };
+    scroll->horizontalScrollBar()->setValue(0);
+    scroll->verticalScrollBar()->setValue(0);
+    QVERIFY(!visible().intersects(target(1)));
+    QSignalSpy edits(canvas, &Canvas::shapesChanged);
+    canvas->setFocus();
+    QTest::keyClick(canvas, Qt::Key_E);
+    QCOMPARE(canvas->currentIndex(), 1);
+    QCOMPARE(labels->currentRow(), 1);
+    QVERIFY(visible().contains(target(1)));
+    QVERIFY(visible().contains(target(2)));
+    const QPoint previousScroll(scroll->horizontalScrollBar()->value(), scroll->verticalScrollBar()->value());
+    QTest::keyClick(canvas, Qt::Key_E);
+    QCOMPARE(canvas->currentIndex(), 2);
+    QCOMPARE(QPoint(scroll->horizontalScrollBar()->value(), scroll->verticalScrollBar()->value()), previousScroll);
+    QTest::keyClick(canvas, Qt::Key_Q);
+    QTest::keyClick(canvas, Qt::Key_Q);
+    QCOMPARE(canvas->currentIndex(), 0);
+    QVERIFY(visible().contains(target(0)));
+    // Wrapping backwards also reveals the destination.
+    QTest::keyClick(canvas, Qt::Key_Q);
+    QCOMPARE(canvas->currentIndex(), 2);
+    QVERIFY(visible().contains(target(2)));
+    QCOMPARE(canvas->scale(), scale);
+    QCOMPARE(edits.count(), 0);
+    for (int i = 0; i < shapes.size(); ++i) QCOMPARE(canvas->shapes()[i].points, shapes[i].points);
+
+    // A single offscreen annotation is revealed when selected and stays put
+    // when the existing Q/E toggle deselects it.
+    document.shapes = {shapes[1]};
+    QVERIFY(AnnotationIO::savePascalVoc(annotationPath, document));
+    QVERIFY(window.openAnnotation(annotationPath));
+    zoom->setValue(qRound(scale * 100));
+    QCoreApplication::processEvents();
+    canvas->setCurrentIndex(-1);
+    scroll->horizontalScrollBar()->setValue(0);
+    scroll->verticalScrollBar()->setValue(0);
+    QTest::keyClick(canvas, Qt::Key_E);
+    QCOMPARE(canvas->currentIndex(), 0);
+    QVERIFY(visible().contains(target(1)));
+    const QPoint singleScroll(scroll->horizontalScrollBar()->value(), scroll->verticalScrollBar()->value());
+    QTest::keyClick(canvas, Qt::Key_Q);
+    QCOMPARE(canvas->currentIndex(), -1);
+    QCOMPARE(QPoint(scroll->horizontalScrollBar()->value(), scroll->verticalScrollBar()->value()), singleScroll);
 }
 
 void UiTests::mainWindowQESelectPreviousNextBoxAndToggleSingleSelection() {
@@ -7908,6 +8294,65 @@ void UiTests::mainWindowLabelEditDialogUsesCurrentLanguageForMetadataFields() {
     QVERIFY(seen);
     QVERIFY(labels.contains(QStringLiteral("分组 ID")));
     QVERIFY(labels.contains(QStringLiteral("标签描述")));
+}
+
+void UiTests::mainWindowSpaceConfirmsSelectedLabelAndPreservesTextSpaces() {
+    resetTestSettings("label-space-confirm");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QImage image(100, 80, QImage::Format_RGB32);
+    image.fill(Qt::white);
+    const QString path = dir.filePath("space.jpg");
+    QVERIFY(image.save(path));
+    MainWindow window;
+    window.loadStartupArgs({"labelImgCpp", path});
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *canvas = window.findChild<Canvas *>();
+    auto *create = actionByShortcut(&window, QKeySequence("W"));
+    auto *edit = actionByShortcut(&window, QKeySequence("Ctrl+E"));
+    QVERIFY(canvas && create && edit);
+    acceptNextLabelPrompt(QStringLiteral("defect"));
+    create->trigger();
+    QTest::mousePress(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(10, 10));
+    QTest::mouseMove(canvas, QPoint(40, 35));
+    QTest::mouseRelease(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(40, 35));
+    QCOMPARE(canvas->shapes().size(), 1);
+
+    bool confirmed = false;
+    QTimer::singleShot(0, &window, [&]() {
+        auto *dialog = window.findChild<QDialog *>("labelEditDialog");
+        QVERIFY(dialog);
+        auto *combo = dialog->findChild<QComboBox *>("labelEditCombo");
+        QVERIFY(combo && combo->lineEdit());
+        QCOMPARE(combo->lineEdit()->selectedText(), QStringLiteral("defect"));
+        QTest::keyClick(combo->lineEdit(), Qt::Key_Space);
+        confirmed = dialog->result() == QDialog::Accepted && !dialog->isVisible();
+        if (dialog->isVisible()) dialog->reject();
+    });
+    edit->trigger();
+    QVERIFY(confirmed);
+    QCOMPARE(canvas->shapes().first().label, QStringLiteral("defect"));
+
+    bool textSpacesPreserved = false;
+    QTimer::singleShot(0, &window, [&]() {
+        auto *dialog = window.findChild<QDialog *>("labelEditDialog");
+        QVERIFY(dialog);
+        auto *combo = dialog->findChild<QComboBox *>("labelEditCombo");
+        auto *description = dialog->findChild<QPlainTextEdit *>("labelDescriptionEdit");
+        QVERIFY(combo && description);
+        auto *editor = combo->lineEdit();
+        editor->setText("tire");
+        editor->setCursorPosition(4);
+        QTest::keyClick(editor, Qt::Key_Space);
+        description->setFocus();
+        QTest::keyClicks(description, "one defect");
+        textSpacesPreserved = dialog->isVisible() && editor->text() == "tire " &&
+                              description->toPlainText() == "one defect";
+        dialog->reject();
+    });
+    edit->trigger();
+    QVERIFY(textSpacesPreserved);
 }
 
 void UiTests::mainWindowBlankLabelKeepsEditDialogOpen() {
@@ -10516,15 +10961,24 @@ void UiTests::mainWindowAutoSaveWritesDuringEditing() {
     QVERIFY(createModeAction);
     QVERIFY(autoSaveAction);
     autoSaveAction->setChecked(true);
+    auto *fileList = window.findChild<QListWidget *>(QStringLiteral("fileList"));
+    QVERIFY(fileList);
+    QVERIFY(fileList->count() > 0);
+    QSignalSpy listResets(fileList->model(), &QAbstractItemModel::modelReset);
 
     acceptNextLabelPrompt(QStringLiteral("defect"));
     createModeAction->trigger();
     QTest::mousePress(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(10, 10));
     QTest::mouseMove(canvas, QPoint(40, 35));
+    QTest::qWait(350);
+    QVERIFY2(!QFileInfo::exists(dir.filePath(QStringLiteral("auto.xml"))),
+             "Auto-save must wait until the drawing gesture is complete");
     QTest::mouseRelease(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(40, 35));
 
     QTRY_VERIFY2(QFileInfo::exists(dir.filePath(QStringLiteral("auto.xml"))),
                  qPrintable(QStringLiteral("files=%1").arg(QDir(dir.path()).entryList(QDir::Files).join(','))));
+    QCOMPARE(listResets.count(), 0);
+    QCOMPARE(fileList->item(0)->checkState(), Qt::Checked);
 }
 
 void UiTests::mainWindowStatusBarShowsLoadedImageMessage() {
@@ -11262,7 +11716,8 @@ void UiTests::mainWindowAppliesLabelMeShortcutConfig() {
     QVERIFY(copyAction);
     QVERIFY(quitAction);
     QCOMPARE(quitAction->objectName(), QStringLiteral("quitAction"));
-    QVERIFY(!actionByShortcut(&window, QKeySequence(QStringLiteral("W"))));
+    QCOMPARE(actionByShortcut(&window, QKeySequence(QStringLiteral("W")))->objectName(),
+             QStringLiteral("repeatCreateAction"));
 }
 
 void UiTests::mainWindowAppliesLabelMeLabelDialogConfig() {
@@ -11919,6 +12374,173 @@ void UiTests::mainWindowAcceptsImageDropAndImportsFiles() {
     QVERIFY(!invalidDrag.isAccepted());
 }
 
+void UiTests::mainWindowMissingImageReloadsQueue_data() {
+    QTest::addColumn<bool>("dataset");
+    QTest::addColumn<bool>("removeCurrent");
+    QTest::addColumn<bool>("removeAll");
+    QTest::newRow("directory") << false << false << false;
+    QTest::newRow("yolo-dataset") << true << false << false;
+    QTest::newRow("current-also-deleted") << false << true << false;
+    QTest::newRow("all-deleted") << false << true << true;
+}
+
+void UiTests::mainWindowMissingImageReloadsQueue() {
+    QFETCH(bool, dataset);
+    QFETCH(bool, removeCurrent);
+    QFETCH(bool, removeAll);
+    resetTestSettings("missing-image-reloads-queue");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString imageDir = dataset ? dir.filePath("images/train") : dir.path();
+    QVERIFY(QDir().mkpath(imageDir));
+    QImage image(100, 80, QImage::Format_RGB32);
+    image.fill(Qt::white);
+    const QString first = QDir(imageDir).filePath("a.png");
+    const QString missing = QDir(imageDir).filePath("b.png");
+    const QString remaining = QDir(imageDir).filePath("c.png");
+    for (const QString &path : {first, missing, remaining}) QVERIFY(image.save(path));
+    if (dataset) {
+        QFile yaml(dir.filePath("data.yaml"));
+        QVERIFY(yaml.open(QIODevice::WriteOnly));
+        yaml.write("names:\n  0: tire\n");
+        yaml.close();
+        QVERIFY(QDir().mkpath(dir.filePath("labels/train")));
+        // Rescanning a dataset must not include images outside its images tree.
+        QVERIFY(image.save(dir.filePath("outside.png")));
+    }
+    MainWindow window;
+    QVERIFY(dataset ? window.openYoloDataset(dir.path()) : window.openPath(dir.path()));
+    auto *canvas = window.findChild<Canvas *>();
+    auto *files = window.findChild<QListWidget *>("fileList");
+    auto *next = actionByShortcut(&window, QKeySequence("D"));
+    auto *save = actionByShortcut(&window, QKeySequence::Save);
+    auto *format = window.findChild<QComboBox *>("footerFormatCombo");
+    QVERIFY(canvas && files && next && save && format);
+    QCOMPARE(files->currentItem()->text(), first);
+    canvas->setShapes({Shape::fromRect("tire", QRectF(10, 15, 30, 25), false)});
+    QVERIFY(QMetaObject::invokeMethod(&window, "onCanvasShapesChanged"));
+    QVERIFY(save->isEnabled());
+    const QString title = window.windowTitle();
+    const double scale = canvas->scale();
+    QVERIFY(QFile::remove(missing));
+    if (removeCurrent) QVERIFY(QFile::remove(first));
+    if (removeAll) QVERIFY(QFile::remove(remaining));
+    const QString added = QDir(imageDir).filePath("d.png");
+    int warnings = 0;
+    bool warnedAboutMissing = false;
+    bool addedDuringWarning = false;
+    QTimer dismiss;
+    dismiss.setInterval(10);
+    connect(&dismiss, &QTimer::timeout, &window, [&] {
+        for (QWidget *widget : QApplication::topLevelWidgets()) {
+            auto *box = qobject_cast<QMessageBox *>(widget);
+            if (!box || !box->isVisible() || box->parentWidget() != &window) continue;
+            ++warnings;
+            warnedAboutMissing = box->text().contains(missing);
+            if (!removeAll) addedDuringWarning = image.save(added);
+            box->accept();
+        }
+    });
+    dismiss.start();
+    next->trigger();
+    dismiss.stop();
+    QCOMPARE(warnings, 1);
+    QVERIFY(warnedAboutMissing);
+    QVERIFY(removeAll || addedDuringWarning);
+    const int expectedCount = removeAll ? 0 : (removeCurrent ? 2 : 3);
+    QCOMPARE(files->count(), expectedCount);
+    QCOMPARE(window.statusBar()->currentMessage(), StringBundle("zh-CN").get("imageQueueReloaded").arg(expectedCount));
+    for (int i = 0; i < files->count(); ++i) QVERIFY(QFileInfo::exists(files->item(i)->text()));
+    if (!removeCurrent) QCOMPARE(files->currentItem()->text(), first);
+    QCOMPARE(window.windowTitle(), title);
+    QCOMPARE(canvas->scale(), scale);
+    QCOMPARE(canvas->shapes().size(), 1);
+    QCOMPARE(canvas->shapes().first().label, QStringLiteral("tire"));
+    QVERIFY(save->isEnabled());
+    if (dataset) {
+        QCOMPARE(format->currentText(), QStringLiteral("YOLO"));
+        QVERIFY(!format->isEnabled());
+    }
+    if (removeAll) {
+        next->trigger();
+        QCOMPARE(window.statusBar()->currentMessage(), QString::fromUtf8("没有下一张了"));
+        QVERIFY(save->isEnabled());
+    } else {
+        // The user can then discard their edits and navigate using the fresh
+        // queue; the failed attempt must not skip the first surviving image.
+        QTimer discard;
+        discard.setInterval(10);
+        connect(&discard, &QTimer::timeout, &window, [&] {
+            for (QWidget *widget : QApplication::topLevelWidgets()) {
+                auto *box = qobject_cast<QMessageBox *>(widget);
+                if (!box || !box->isVisible() || box->parentWidget() != &window) continue;
+                if (auto *button = box->button(QMessageBox::No)) button->click();
+                else box->accept();
+            }
+        });
+        discard.start();
+        next->trigger();
+        discard.stop();
+        QCOMPARE(files->currentItem()->text(), remaining);
+    }
+}
+
+void UiTests::mainWindowNextAtEndShowsNoticeWithoutReloading_data() {
+    QTest::addColumn<int>("imageCount");
+    QTest::newRow("no-images") << 0;
+    QTest::newRow("single-image") << 1;
+    QTest::newRow("last-of-two") << 2;
+}
+
+void UiTests::mainWindowNextAtEndShowsNoticeWithoutReloading() {
+    QFETCH(int, imageCount);
+    resetTestSettings("next-at-end-notice");
+    QSettings settings;
+    settings.setValue("language", "zh-CN");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QImage image(100, 80, QImage::Format_RGB32);
+    image.fill(Qt::white);
+    for (int i = 0; i < imageCount; ++i) QVERIFY(image.save(dir.filePath(QString::number(i) + ".png")));
+    MainWindow window;
+    if (imageCount) QVERIFY(window.openPath(dir.path()));
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *next = actionByShortcut(&window, QKeySequence("D"));
+    auto *canvas = window.findChild<Canvas *>();
+    auto *files = window.findChild<QListWidget *>("fileList");
+    auto *save = actionByShortcut(&window, QKeySequence::Save);
+    QVERIFY(next && canvas && files && save);
+    if (imageCount == 2) {
+        next->trigger();
+        QVERIFY(files->currentItem());
+        QCOMPARE(QFileInfo(files->currentItem()->text()).fileName(), QStringLiteral("1.png"));
+        QVERIFY(window.statusBar()->currentMessage() != QString::fromUtf8("没有下一张了"));
+    }
+    if (imageCount) {
+        canvas->setShapes({Shape::fromRect("unsaved", QRectF(10, 15, 30, 25), false)});
+        QVERIFY(QMetaObject::invokeMethod(&window, "onCanvasShapesChanged"));
+        QVERIFY(save->isEnabled());
+    }
+    const QString title = window.windowTitle();
+    const int row = files->currentRow();
+    const double scale = canvas->scale();
+    next->trigger();
+    QCOMPARE(window.statusBar()->currentMessage(), QString::fromUtf8("没有下一张了"));
+    window.setFocus();
+    QTest::keyClick(&window, Qt::Key_D);
+    QCOMPARE(window.statusBar()->currentMessage(), QString::fromUtf8("没有下一张了"));
+    QCOMPARE(window.windowTitle(), title);
+    QCOMPARE(files->currentRow(), row);
+    QCOMPARE(canvas->scale(), scale);
+    if (imageCount) {
+        QCOMPARE(canvas->shapes().size(), 1);
+        QCOMPARE(canvas->shapes().first().label, QStringLiteral("unsaved"));
+        QVERIFY(save->isEnabled());
+        QVERIFY(QDir(dir.path()).entryList({"*.xml", "*.json", "*.txt"}, QDir::Files).isEmpty());
+    }
+}
+
 void UiTests::mainWindowNextPreviousKeepsFileListSelection() {
     resetTestSettings("next-previous-selection");
     QTemporaryDir dir;
@@ -12094,5 +12716,397 @@ void UiTests::mainWindowLabelFilterOnlyTogglesShapeVisibility() {
     QCOMPARE(filterCombo->currentText(), QString("keep"));
 }
 
+#include "performance_audit.inc"
+
+void UiTests::canvasOverviewUpdatesOnImageReplacement() {
+    Canvas canvas;
+    QPixmap image(800, 600);
+    image.fill(Qt::red);
+    canvas.setPixmap(image);
+    const QImage redOverview = canvas.overviewImage(200);
+    QCOMPARE(redOverview.pixelColor(10, 10), QColor(Qt::red));
+    QCOMPARE(canvas.overviewImage(200), redOverview);
+    image.fill(Qt::blue);
+    canvas.setPreviewPixmap(image, QSize(4000, 3000));
+    QCOMPARE(canvas.overviewImage(200).pixelColor(10, 10), QColor(Qt::blue));
+    QCOMPARE(canvas.overviewImage(100).size(), QSize(100, 75));
+    canvas.setPixmap(QPixmap());
+    QVERIFY(canvas.overviewImage(200).isNull());
+}
+
+void UiTests::mainWindowThumbnailsLoadOnlyVisibleRowsAndRefreshAfterSave() {
+    resetTestSettings("visible-thumbnails");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QImage image(80, 60, QImage::Format_RGB32);
+    image.fill(Qt::white);
+    for (int i = 0; i < 100; ++i) {
+        QVERIFY(image.save(dir.filePath(QStringLiteral("image_%1.jpg").arg(i, 3, 10, QLatin1Char('0')))));
+    }
+    MainWindow window;
+    window.loadStartupArgs({"labelImgCpp", dir.path()});
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *files = window.findChild<QListWidget *>("fileList");
+    auto *canvas = window.findChild<Canvas *>();
+    auto *thumbnails = window.findChild<QAction *>("thumbnailModeAction");
+    QVERIFY(files && canvas && thumbnails);
+    thumbnails->trigger();
+    QTRY_VERIFY(!files->item(0)->icon().isNull());
+    QVERIFY(files->item(99)->icon().isNull());
+    QCOMPARE(countPreviewBoxPixels(files->item(0)->icon().pixmap(72, 54).toImage()), 0);
+    canvas->setShapes({Shape::fromRect("defect", QRectF(20, 15, 30, 20), false)});
+    QVERIFY(QMetaObject::invokeMethod(&window, "onCanvasShapesChanged"));
+    QVERIFY(QMetaObject::invokeMethod(&window, "saveFile"));
+    QTRY_VERIFY(countPreviewBoxPixels(files->item(0)->icon().pixmap(72, 54).toImage()) > 8);
+    files->scrollToBottom();
+    QTRY_VERIFY(!files->item(99)->icon().isNull());
+    // Rebuild the list while a decoder may still be in flight. Old row pointers
+    // and old-generation results must never leak into a newly filtered list.
+    window.findChild<QLineEdit *>("fileSearchEdit")->setText("image_099");
+    QCOMPARE(files->count(), 1);
+    QTRY_VERIFY(!files->item(0)->icon().isNull());
+    QCOMPARE(QFileInfo(files->item(0)->text()).fileName(), QString("image_099.jpg"));
+}
+
+void UiTests::mainWindowDrawingDoesNotReadClipboardRepeatedly() {
+    class CountingMimeData final : public QMimeData {
+    public:
+        mutable int reads = 0;
+        QStringList formats() const override { return {"text/plain"}; }
+    protected:
+        QVariant retrieveData(const QString &, QMetaType) const override {
+            ++reads;
+            return QStringLiteral("[]");
+        }
+    };
+    resetTestSettings("clipboard-motion-cost");
+    MainWindow window;
+    auto *mime = new CountingMimeData;
+    QApplication::clipboard()->setMimeData(mime);
+    QCoreApplication::processEvents();
+    mime->reads = 0;
+    for (int i = 0; i < 100; ++i) {
+        QVERIFY(QMetaObject::invokeMethod(&window, "onCanvasSelectionChanged", Q_ARG(int, -1)));
+    }
+    QCOMPARE(mime->reads, 0);
+    QApplication::clipboard()->clear();
+}
+
+void UiTests::mainWindowOnnxDetectionImportsUndoAndSave() {
+    resetTestSettings("onnx-import-undo-save");
+    QSettings settings;
+    settings.setValue("labelme/displayLabelPopup", false);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString imagePath = dir.filePath("image.png");
+    QImage image(120, 90, QImage::Format_RGB32);
+    image.fill(Qt::white);
+    QVERIFY(image.save(imagePath));
+    MainWindow window;
+    window.loadStartupArgs({"labelImgCpp", imagePath});
+    auto *canvas = window.findChild<Canvas *>();
+    auto *action = window.findChild<QAction *>("onnxDetectionAction");
+    QVERIFY(canvas && action && action->isEnabled());
+    bool imported = false;
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = window.findChild<QDialog *>("onnxDetectionDialog");
+        QVERIFY(dialog);
+        QTimer::singleShot(5000, dialog, &QDialog::reject);
+        auto *session = dialog->findChild<AiAssistSession *>();
+        auto *load = dialog->findChild<QPushButton *>("onnxLoadButton");
+        auto *run = dialog->findChild<QPushButton *>("onnxRunButton");
+        QVERIFY(session && load && run);
+        QVERIFY(!run->isEnabled());
+        load->click();
+        QVERIFY(!load->isEnabled());
+        // Exercise the UI consumer separately from the real-runtime Python test.
+        session->stop();
+        session->responseReady(R"({"ok":true,"classes":["tire"],"input_shape":[1,3,640,640]})");
+        QVERIFY(run->isEnabled());
+        run->click();
+        QVERIFY(!run->isEnabled());
+        session->stop();
+        session->responseReady(R"({"ok":true,"shapes":[{"shape_type":"rectangle","label":"tire","points":[[10,20],[70,60]]}]})");
+        imported = true;
+    });
+    action->trigger();
+    QVERIFY(imported);
+    QCOMPARE(canvas->shapes().size(), 1);
+    QCOMPARE(canvas->shapes().first().label, QStringLiteral("tire"));
+    QCOMPARE(canvas->shapes().first().points, QVector<QPointF>({{10, 20}, {70, 60}}));
+    QAction *undo = actionByShortcut(&window, QKeySequence::Undo);
+    QAction *redo = actionByShortcut(&window, QKeySequence::Redo);
+    QAction *save = actionByShortcut(&window, QKeySequence::Save);
+    QVERIFY(undo && redo && save && undo->isEnabled());
+    undo->trigger();
+    QVERIFY(canvas->shapes().isEmpty());
+    redo->trigger();
+    QCOMPARE(canvas->shapes().size(), 1);
+    QVERIFY(save->isEnabled());
+    save->trigger();
+    QVERIFY(!save->isEnabled());
+    const QStringList saved = QDir(dir.path()).entryList({"*.xml", "*.json", "*.txt"}, QDir::Files);
+    QVERIFY(!saved.isEmpty());
+}
+
+void UiTests::onnxDialogRejectsDatasetMismatchAndResetsOnPathChange() {
+    resetTestSettings("onnx-dataset-validation");
+    QSettings settings;
+    StringBundle strings("en");
+    OnnxDetectionDialog dialog("image.png", {"tire"}, settings, strings);
+    auto *session = dialog.findChild<AiAssistSession *>();
+    auto *load = dialog.findChild<QPushButton *>("onnxLoadButton");
+    auto *run = dialog.findChild<QPushButton *>("onnxRunButton");
+    auto *classes = dialog.findChild<QPlainTextEdit *>("onnxClasses");
+    auto *path = dialog.findChild<QLineEdit *>("onnxModelPath");
+    auto *status = dialog.findChild<QLabel *>("onnxStatus");
+    QVERIFY(session && load && run && classes && path && status);
+    QVERIFY(classes->isReadOnly());
+    load->click();
+    session->stop();
+    session->responseReady(R"({"ok":true,"classes":["car"],"input_shape":[1,3,640,640]})");
+    QVERIFY(!run->isEnabled());
+    QCOMPARE(status->text(), strings.get("onnxClassMismatch"));
+    load->click();
+    session->stop();
+    session->responseReady(R"({"ok":true,"classes":["tire"],"input_shape":[1,3,640,640]})");
+    QVERIFY(run->isEnabled());
+    path->setText("different.onnx");
+    QVERIFY(!run->isEnabled());
+    QCOMPARE(classes->toPlainText(), QStringLiteral("tire"));
+    load->click();
+    QVERIFY(session->busy());
+    dialog.reject();
+    QVERIFY(!session->busy());
+}
+
+void UiTests::mainWindowDefaultsToChineseAndPreservesLanguageChoice() {
+    resetTestSettings("portable-default-language");
+    QSettings settings;
+    settings.remove("language");
+    {
+        MainWindow window;
+        QCOMPARE(settings.value("language").toString(), QStringLiteral("zh-CN"));
+        QCOMPARE(window.findChild<QMenu *>("fileMenu")->title(), StringBundle("zh-CN").get("menu_file"));
+        QAction *open = actionByShortcut(&window, QKeySequence::Open);
+        QVERIFY(open && !open->icon().pixmap(24, 24).isNull());
+        // Optional artifact for the isolated package regression run.
+        const QString screenshot = qEnvironmentVariable("LABELIMG_PORTABLE_SCREENSHOT");
+        if (!screenshot.isEmpty()) {
+            window.show();
+            QTest::qWait(100);
+            QVERIFY(window.grab().save(screenshot));
+        }
+    }
+    settings.setValue("language", "en");
+    MainWindow window;
+    QCOMPARE(window.findChild<QMenu *>("fileMenu")->title(), StringBundle("en").get("menu_file"));
+}
+
 QTEST_MAIN(UiTests)
 #include "test_ui.moc"
+
+void UiTests::mainWindowYoloDatasetEditsMappedLabels() {
+    resetTestSettings("yolo-dataset-mapped-labels");
+    QSettings settings;
+    settings.setValue("labelFileFormat", 0);
+    settings.setValue("labelHistory", QStringList{"unrelated"});
+    QTemporaryDir dir;
+    const auto write = [](const QString &path, const QByteArray &data) {
+        QFile file(path);
+        return file.open(QIODevice::WriteOnly) && file.write(data) == data.size();
+    };
+    QImage image(100, 80, QImage::Format_RGB32);
+    image.fill(Qt::white);
+    for (const QString &split : {QString("train"), QString("val"), QString("test")}) {
+        QVERIFY(QDir().mkpath(dir.filePath("images/" + split)));
+        QVERIFY(QDir().mkpath(dir.filePath("labels/" + split)));
+        QVERIFY(image.save(dir.filePath("images/" + split + "/same.png")));
+    }
+    const QByteArray yaml("names:\n  0: defect\n  1: normal\ntrain: train-selected.txt\n");
+    QVERIFY(write(dir.filePath("data.yaml"), yaml));
+    QVERIFY(write(dir.filePath("labels/train/same.txt"), "1 0.5 0.5 0.4 0.5\n"));
+    QVERIFY(write(dir.filePath("labels/test/same.txt"), ""));
+    // A conflicting XML must never take precedence in dataset mode.
+    AnnotationDocument voc;
+    voc.imageSize = image.size();
+    voc.shapes = {Shape::fromRect("wrong", QRectF(1, 1, 10, 10), false)};
+    QVERIFY(AnnotationIO::savePascalVoc(dir.filePath("images/train/same.xml"), voc));
+    MainWindow window;
+    auto *menu = window.findChild<QMenu *>("fileMenu");
+    auto *more = window.findChild<QMenu *>("openMoreMenu");
+    QVERIFY(menu && more);
+    const int openDirIndex = menu->actions().indexOf(actionByShortcut(&window, QKeySequence("Ctrl+U")));
+    QCOMPARE(menu->actions().at(openDirIndex + 1), more->menuAction());
+    QVERIFY(more->actions().contains(window.findChild<QAction *>("openYoloDatasetAction")));
+    QVERIFY(window.openYoloDataset(dir.path()));
+    auto *canvas = window.findChild<Canvas *>();
+    auto *format = window.findChild<QComboBox *>("footerFormatCombo");
+    QVERIFY(canvas && format);
+    QCOMPARE(format->currentText(), QString("YOLO"));
+    QVERIFY(!format->isEnabled());
+    // Natural directory ordering opens test (empty), then train, then val.
+    QCOMPARE(canvas->shapes().size(), 0);
+    QVERIFY(QMetaObject::invokeMethod(&window, "openNextImage"));
+    QCOMPARE(canvas->shapes().size(), 1);
+    QCOMPARE(canvas->shapes().first().label, QString("normal"));
+    canvas->shapesRef()[0] = Shape::fromRect("normal", QRectF(10, 20, 30, 40), false);
+    QVERIFY(QMetaObject::invokeMethod(&window, "saveFile"));
+    AnnotationDocument loaded;
+    QVERIFY(AnnotationIO::loadYoloWithClasses(dir.filePath("labels/train/same.txt"), image.size(), &loaded, {"defect", "normal"}));
+    QCOMPARE(loaded.shapes.first().boundingRect(), QRectF(10, 20, 30, 40));
+    QCOMPARE(loaded.shapes.first().label, QString("normal"));
+    QVERIFY(!QFileInfo::exists(dir.filePath("images/train/same.txt")));
+    QVERIFY(!QFileInfo::exists(dir.filePath("labels/train/classes.txt")));
+    QVERIFY(QMetaObject::invokeMethod(&window, "openNextImage"));
+    QCOMPARE(canvas->shapes().size(), 0);
+    canvas->shapesRef().append(Shape::fromRect("defect", QRectF(5, 5, 10, 10), false));
+    QVERIFY(QMetaObject::invokeMethod(&window, "saveFile"));
+    QVERIFY(QFileInfo::exists(dir.filePath("labels/val/same.txt")));
+    QFile config(dir.filePath("data.yaml"));
+    QVERIFY(config.open(QIODevice::ReadOnly));
+    QCOMPARE(config.readAll(), yaml);
+    QVERIFY(!window.openYoloDataset(dir.filePath("missing")));
+    QCOMPARE(format->currentText(), QString("YOLO"));
+    QVERIFY(image.save(dir.filePath("ordinary.png")));
+    QVERIFY(window.openPath(dir.filePath("ordinary.png")));
+    QVERIFY(format->isEnabled());
+    // Malformed data loads with an error and cannot be overwritten by save.
+    const QByteArray broken("8 0.5 0.5 0.2 0.2\n");
+    QVERIFY(write(dir.filePath("labels/test/same.txt"), broken));
+    QVERIFY(window.openYoloDataset(dir.path()));
+    QVERIFY(window.statusBar()->currentMessage().contains("YOLO"));
+    QVERIFY(QMetaObject::invokeMethod(&window, "saveFile"));
+    QFile invalid(dir.filePath("labels/test/same.txt"));
+    QVERIFY(invalid.open(QIODevice::ReadOnly));
+    QCOMPARE(invalid.readAll(), broken);
+    window.close();
+    MainWindow reopened;
+    reopened.loadStartupArgs({"labelImgCpp"});
+    auto *restoredFormat = reopened.findChild<QComboBox *>("footerFormatCombo");
+    QVERIFY(restoredFormat);
+    QCOMPARE(restoredFormat->currentText(), QString("YOLO"));
+    QVERIFY(!restoredFormat->isEnabled());
+    QVERIFY(reopened.statusBar()->currentMessage().contains("YOLO"));
+}
+
+void UiTests::mainWindowDetectsDatasetAndFallsBack_data() {
+    QTest::addColumn<QString>("route");
+    QTest::addColumn<QString>("choice");
+    for (const QString &route : {QString("path"), QString("startup"), QString("recent")}) {
+        for (const QString &choice : {QString("confirm"), QString("cancel"), QString("escape"), QString("close")}) {
+            QTest::newRow(qPrintable(route + "-" + choice)) << route << choice;
+        }
+    }
+}
+
+void UiTests::mainWindowDetectsDatasetAndFallsBack() {
+    QFETCH(QString, route);
+    QFETCH(QString, choice);
+    resetTestSettings("detect-dataset-confirmation");
+    QTemporaryDir dir;
+    QVERIFY(QDir().mkpath(dir.filePath("images/train")));
+    QVERIFY(QDir().mkpath(dir.filePath("labels/train")));
+    QImage image(100, 80, QImage::Format_RGB32);
+    image.fill(Qt::white);
+    const QString imagePath = dir.filePath("images/train/a.png");
+    QVERIFY(image.save(imagePath));
+    QFile config(dir.filePath("data.yaml"));
+    QVERIFY(config.open(QIODevice::WriteOnly));
+    config.write("names: [defect]\n");
+    config.close();
+    QFile label(dir.filePath("labels/train/a.txt"));
+    QVERIFY(label.open(QIODevice::WriteOnly));
+    label.write("0 0.5 0.5 0.4 0.5\n");
+    label.close();
+    AnnotationDocument voc;
+    voc.imageSize = image.size();
+    voc.shapes = {Shape::fromRect("default-sidecar", QRectF(1, 1, 10, 10), false)};
+    QVERIFY(AnnotationIO::savePascalVoc(dir.filePath("images/train/a.xml"), voc));
+    MainWindow window;
+    if (route == "recent") {
+        // Exercise fallback while a dataset is already active as well.
+        QVERIFY(window.openYoloDataset(dir.path()));
+    }
+    bool prompted = false;
+    bool detailsMatch = false;
+    QTimer::singleShot(0, &window, [&]() {
+        auto *box = window.findChild<QMessageBox *>("datasetDetectedDialog");
+        if (!box) return;
+        prompted = true;
+        detailsMatch = box->text().contains("YOLO") &&
+                       box->text().contains(QDir::toNativeSeparators(dir.path())) &&
+                       box->textFormat() == Qt::PlainText;
+        if (choice == "escape") QTest::keyClick(box, Qt::Key_Escape);
+        else if (choice == "close") box->close();
+        else box->button(choice == "confirm" ? QMessageBox::Ok : QMessageBox::Cancel)->click();
+    });
+    if (route == "path") {
+        QVERIFY(window.openPath(dir.path()));
+    } else if (route == "startup") {
+        window.loadStartupArgs({"labelImgCpp", dir.path()});
+    } else {
+        auto *recent = window.findChild<QMenu *>("recentDirsMenu");
+        QVERIFY(recent && !recent->actions().isEmpty());
+        recent->actions().first()->trigger();
+    }
+    QVERIFY(prompted);
+    QVERIFY(detailsMatch);
+    auto *format = window.findChild<QComboBox *>("footerFormatCombo");
+    auto *canvas = window.findChild<Canvas *>();
+    auto *files = window.findChild<QListWidget *>("fileList");
+    QVERIFY(format && canvas && files && files->currentItem());
+    QCOMPARE(files->currentItem()->text(), imagePath);
+    QCOMPARE(canvas->shapes().size(), 1);
+    if (choice == "confirm") {
+        QCOMPARE(format->currentText(), QString("YOLO"));
+        QVERIFY(!format->isEnabled());
+        QCOMPARE(canvas->shapes().first().label, QString("defect"));
+    } else {
+        QCOMPARE(format->currentText(), QString("PascalVOC"));
+        QVERIFY(format->isEnabled());
+        QCOMPARE(canvas->shapes().first().label, QString("default-sidecar"));
+        QVERIFY(QMetaObject::invokeMethod(&window, "saveFile"));
+        QVERIFY(label.open(QIODevice::ReadOnly));
+        QCOMPARE(label.readAll(), QByteArray("0 0.5 0.5 0.4 0.5\n"));
+    }
+}
+
+void UiTests::mainWindowOrdinaryDirectoryDoesNotPrompt_data() {
+    QTest::addColumn<QByteArray>("yaml");
+    QTest::newRow("no-config") << QByteArray();
+    QTest::newRow("unrelated-yaml") << QByteArray("description: ordinary images\n");
+    QTest::newRow("invalid-class-ids") << QByteArray("names: {0: defect, 2: normal}\n");
+}
+
+void UiTests::mainWindowOrdinaryDirectoryDoesNotPrompt() {
+    QFETCH(QByteArray, yaml);
+    resetTestSettings("ordinary-directory-no-dataset-prompt");
+    QTemporaryDir dir;
+    QVERIFY(QDir().mkpath(dir.filePath("images")));
+    QImage image(20, 20, QImage::Format_RGB32);
+    image.fill(Qt::white);
+    const QString path = dir.filePath("images/a.png");
+    QVERIFY(image.save(path));
+    if (!yaml.isEmpty()) {
+        QFile config(dir.filePath("data.yaml"));
+        QVERIFY(config.open(QIODevice::WriteOnly));
+        config.write(yaml);
+    }
+    MainWindow window;
+    bool prompted = false;
+    QTimer::singleShot(0, &window, [&]() {
+        if (auto *box = window.findChild<QMessageBox *>("datasetDetectedDialog")) {
+            prompted = true;
+            box->reject();
+        }
+    });
+    QVERIFY(window.openPath(dir.path()));
+    QCoreApplication::processEvents();
+    QVERIFY(!prompted);
+    auto *files = window.findChild<QListWidget *>("fileList");
+    QVERIFY(files && files->currentItem());
+    QCOMPARE(files->currentItem()->text(), path);
+    QVERIFY(window.findChild<QComboBox *>("footerFormatCombo")->isEnabled());
+}

@@ -127,6 +127,7 @@ signals:
     void shapeEditFinished(bool changed);
     void drawingStateChanged(bool drawing);
     void editModeRequested();
+    void viewModeRequested();
     void shapeCreated(int index);
     void previousShapeRequested();
     void nextShapeRequested();
@@ -152,6 +153,7 @@ private:
     enum class ResizeHandle { None, Left, Right, Top, Bottom, TopLeft, TopRight, BottomLeft, BottomRight };
 
     QPointF imagePos(const QPointF &widgetPos) const;
+    void syncCrosshairPosition(const QPointF &widgetPos);
     QSize coordinateImageSize() const;
     QSize scrollableSize() const;
     QSize scrollViewportSize() const;
@@ -188,6 +190,8 @@ private:
     QString canvasEdgeStatus(const QPointF &position) const;
 
     QPixmap m_pixmap;
+    mutable QImage m_cachedOverview;
+    mutable int m_cachedOverviewMaxSide = 0;
     QSize m_imageSize;
     StringBundle m_strings;
     QImage m_previewImage;

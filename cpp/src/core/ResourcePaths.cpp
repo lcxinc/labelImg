@@ -4,6 +4,11 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QStringList>
+#include <QtResource>
+
+static void initializeBundledResources() {
+    Q_INIT_RESOURCE(labelimg_assets);
+}
 
 namespace {
 bool hasLabelImgResources(const QString &candidate) {
@@ -35,5 +40,15 @@ QString ResourcePaths::root() {
 }
 
 QString ResourcePaths::filePath(const QString &relativePath) {
-    return QDir(root()).filePath(relativePath);
+    static const bool initialized = [] { initializeBundledResources(); return true; }();
+    Q_UNUSED(initialized);
+    const QString bundled = QStringLiteral(":/labelimg/") + relativePath;
+    // UI assets travel with the executable; stale/missing external copies must
+    // not change the UI. Keep editable class files and Python scripts on disk.
+    if ((relativePath.startsWith(QStringLiteral("resources/icons")) ||
+         relativePath.startsWith(QStringLiteral("resources/strings"))) && QFileInfo::exists(bundled)) {
+        return bundled;
+    }
+    const QString external = QDir(root()).filePath(relativePath);
+    return QFileInfo::exists(external) || !QFileInfo::exists(bundled) ? external : bundled;
 }

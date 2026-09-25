@@ -8,10 +8,15 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
+if(MSVC)
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/utf-8>")
+endif()
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Xml Test)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Xml Test Concurrent)
 
 set(CORE_SOURCES
+    src/core/YoloDataset.cpp
+    src/core/YoloDataset.h
     src/core/AiAssistBridge.cpp
     src/core/AiAssistBridge.h
     src/core/AiAssistSession.cpp
@@ -34,9 +39,19 @@ set(CORE_SOURCES
     src/core/StringBundle.h
     src/core/WindowChrome.cpp
     src/core/WindowChrome.h
+    src/core/ShortcutRegistry.cpp
+    src/core/ShortcutRegistry.h
 )
 
 add_library(labelImgCppCore STATIC ${CORE_SOURCES})
+file(GLOB_RECURSE LABELIMG_ASSETS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_LIST_DIR}/../resources/icons/*"
+    "${CMAKE_CURRENT_LIST_DIR}/../resources/strings/*.properties")
+list(APPEND LABELIMG_ASSETS "${CMAKE_CURRENT_LIST_DIR}/../data/predefined_classes.txt")
+qt_add_resources(labelImgCppCore labelimg_assets
+    PREFIX "/labelimg"
+    BASE "${CMAKE_CURRENT_LIST_DIR}/.."
+    FILES ${LABELIMG_ASSETS})
 target_include_directories(labelImgCppCore PUBLIC src)
 target_link_libraries(labelImgCppCore PUBLIC Qt6::Core Qt6::Gui Qt6::Xml)
 if(WIN32)
@@ -53,6 +68,8 @@ if(WIN32)
 endif()
 
 add_executable(labelImgCpp
+    src/ui/OnnxDetectionDialog.cpp
+    src/ui/OnnxDetectionDialog.h
     src/main.cpp
     src/ui/Canvas.cpp
     src/ui/Canvas.h
@@ -60,11 +77,13 @@ add_executable(labelImgCpp
     src/ui/FramelessTitleBar.h
     src/ui/MiniMapOverlay.cpp
     src/ui/MiniMapOverlay.h
+    src/ui/ShortcutCaptureEdit.cpp
+    src/ui/ShortcutCaptureEdit.h
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
     ${APP_ICON_RC}
 )
-target_link_libraries(labelImgCpp PRIVATE labelImgCppCore Qt6::Widgets)
+target_link_libraries(labelImgCpp PRIVATE labelImgCppCore Qt6::Widgets Qt6::Concurrent)
 
 enable_testing()
 
@@ -73,6 +92,8 @@ target_link_libraries(labelImgCppTests PRIVATE labelImgCppCore Qt6::Test)
 add_test(NAME labelImgCppTests COMMAND labelImgCppTests)
 
 add_executable(labelImgCppUiTests
+    src/ui/OnnxDetectionDialog.cpp
+    src/ui/OnnxDetectionDialog.h
     tests/test_ui.cpp
     src/ui/Canvas.cpp
     src/ui/Canvas.h
@@ -80,10 +101,14 @@ add_executable(labelImgCppUiTests
     src/ui/FramelessTitleBar.h
     src/ui/MiniMapOverlay.cpp
     src/ui/MiniMapOverlay.h
+    src/ui/ShortcutCaptureEdit.cpp
+    src/ui/ShortcutCaptureEdit.h
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
 )
-target_link_libraries(labelImgCppUiTests PRIVATE labelImgCppCore Qt6::Widgets Qt6::Test)
+target_link_libraries(labelImgCppUiTests PRIVATE labelImgCppCore Qt6::Widgets Qt6::Test Qt6::Concurrent)
 add_test(NAME labelImgCppUiTests COMMAND labelImgCppUiTests)
 set_tests_properties(labelImgCppTests labelImgCppUiTests
     PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/..")
+set_tests_properties(labelImgCppUiTests
+    PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
